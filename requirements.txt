@@ -1,0 +1,9 @@
+pandas
+numpy
+matplotlib
+yfinance
+pykrx
+lxml
+html5lib
+requests
+toml
