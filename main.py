@@ -19,7 +19,6 @@ def get_name(symbol: str, market: str) -> str:
     return symbol
 
 def analyze_symbol(symbol: str, market: str, cfg: dict):
-def analyze_symbol(symbol: str, market: str, cfg: dict):
     lb = cfg['general']['lookback_days']
     krx_start, krx_end, yah_start, yah_end = date_range_for_lookback(lb)
 
@@ -29,7 +28,7 @@ def analyze_symbol(symbol: str, market: str, cfg: dict):
         df = fetch_yahoo(symbol, yah_start, yah_end)
 
     if df.empty or len(df) < max(60, lb // 2):
-        return pd.DataFrame(), {}, df  # ← df를 함께 반환
+        return pd.DataFrame(), {}, df  # ← df 같이 반환
 
     feat = build_features(df, cfg)
     feat['Signal'] = generate_signal(feat, cfg)
@@ -45,7 +44,7 @@ def analyze_symbol(symbol: str, market: str, cfg: dict):
         "wr": round(float(latest['WR']), 2),
         "ma20_gap_pct": round((latest['Close'] - latest['MA_M']) / latest['MA_M'] * 100, 2) if latest['MA_M'] else None
     }
-    return feat, info, df  # ← 반드시 3개 반환
+    return feat, info, df
 
 def load_universe(cfg: dict):
     uv = cfg.get('universe', {})
