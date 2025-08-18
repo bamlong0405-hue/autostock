@@ -47,6 +47,9 @@ require_above_ma20_for_buy = true
 require_below_ma20_for_sell = true
 
 [email_options]
-email_only_signals = true      # 메일에는 BUY/SELL만 포함
-max_email_charts   = 80        # 메일에 포함할 차트 최대 개수(과대용량 방지)
-include_hold_in_report = true  # 로컬 HTML 리포트엔 HOLD도 포함(원하면 false로)
+email_only_signals = true      # 메일엔 BUY/SELL만
+include_charts      = false    # ✅ 메일 본문 차트 제외
+max_email_charts    = 0        # 차트 0개(보내지 않음)
+max_email_rows      = 300      # ✅ 메일 표 최대 행수 (필요시 200~500 사이 권장)
+include_hold_in_report = true  # 로컬/아티팩트 보고서는 HOLD 포함
+split_emails        = false    # (옵션) 여러 통으로 쪼개 전송할지
