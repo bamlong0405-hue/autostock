@@ -83,48 +83,97 @@ def main():
             results.append(info)
             details[sym] = feat[['Close','MA_M']].copy()
 
+    # ---------- 리포트 생성 ----------
     if not results:
         html = "<html><body><h1>No data</h1></body></html>"
         all_html = html
     else:
-        # ① 전체 리포트 (모든 종목, HOLD 포함)
-        all_html = build_html_report(results, details, cfg)
+        # 전체 리포트(파일/아티팩트용) — HOLD 포함, 차트 포함해도 OK
+        all_html = build_html_report(
+            results, details, cfg,
+            show_charts=True,
+            max_charts=50,          # 저장용 차트 수는 적당히 제한
+            max_table_rows=100000   # 저장은 크게
+        )
 
-        # ② 메일용 리포트 (BUY/SELL만)
-        email_only = cfg.get("email_options", {}).get("email_only_signals", True)
-        max_email_charts = int(cfg.get("email_options", {}).get("max_email_charts", 80))
+        # 메일용 — BUY/SELL만 + 차트 제외 + 행수 제한
+        email_opts = cfg.get("email_options", {})
+        email_only = email_opts.get("email_only_signals", True)
+        max_email_charts = int(email_opts.get("max_email_charts", 0))
+        include_charts = bool(email_opts.get("include_charts", False))
+        max_email_rows = int(email_opts.get("max_email_rows", 300))
 
         if email_only:
             filtered = [r for r in results if str(r.get("signal")) in ("BUY","SELL")]
-            filtered_symbols = [r["symbol"] for r in filtered][:max_email_charts]
-            filtered_details = {sym: details[sym] for sym in filtered_symbols if sym in details}
-
             if not filtered:
                 html = "<html><body><h1>No BUY/SELL signals today</h1></body></html>"
+                filtered_details = {}
             else:
-                html = build_html_report(filtered, filtered_details, cfg)
-        else:
-            html = all_html
+                symbols = [r["symbol"] for r in filtered]
+                # 차트는 옵션에 따라 제한/제외
+                if include_charts and max_email_charts > 0:
+                    symbols = symbols[:max_email_charts]
+                    filtered_details = {s: details[s] for s in symbols if s in details}
+                else:
+                    filtered_details = {}
 
-    # 파일 저장: 전체 리포트 (HOLD 포함 여부 옵션)
+                html = build_html_report(
+                    filtered, filtered_details, cfg,
+                    show_charts=include_charts and max_email_charts > 0,
+                    max_charts=max_email_charts,
+                    max_table_rows=max_email_rows
+                )
+        else:
+            html = build_html_report(
+                results, {}, cfg,
+                show_charts=False,
+                max_table_rows=max_email_rows
+            )
+
+    # ---------- 파일 저장 (전체 리포트) ----------
     save_all = cfg.get("email_options", {}).get("include_hold_in_report", True)
     report_path = os.path.join(cfg['general']['output_dir'], cfg['general']['report_filename'])
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(all_html if save_all else html)
 
+    # ---------- 메일 전송 (용량 초과시 폴백) ----------
     smtp_user = cfg['email']['from_addr']
     app_password = os.environ.get("GMAIL_APP_PASSWORD", "")
     if not app_password:
         print("ERROR: GMAIL_APP_PASSWORD env not set", file=sys.stderr)
         sys.exit(1)
-    send_mail_html(
-        smtp_user=smtp_user,
-        app_password=app_password,
-        to_addrs=cfg['email']['to_addrs'],
-        subject=cfg['email']['subject'],
-        html=html,
-        from_name=cfg['email']['from_name']
-    )
+
+    try:
+        send_mail_html(
+            smtp_user=smtp_user,
+            app_password=app_password,
+            to_addrs=cfg['email']['to_addrs'],
+            subject=cfg['email']['subject'],
+            html=html,
+            from_name=cfg['email']['from_name']
+        )
+    except Exception as e:
+        # 552 등 용량 에러 폴백: 표만, 150행 제한, 차트 없음
+        fallback_html = build_html_report(
+            [r for r in results if str(r.get("signal")) in ("BUY","SELL")],
+            {},
+            cfg,
+            show_charts=False,
+            max_table_rows=150
+        )
+        try:
+            send_mail_html(
+                smtp_user=smtp_user,
+                app_password=app_password,
+                to_addrs=cfg['email']['to_addrs'],
+                subject=cfg['email']['subject'] + " (fallback)",
+                html=fallback_html,
+                from_name=cfg['email']['from_name']
+            )
+            print("Sent fallback email (reduced size).")
+        except Exception as e2:
+            print(f"Email failed even after fallback: {e2}", file=sys.stderr)
+            sys.exit(1)
 
     print(f"Report written: {report_path} ({datetime.now()})")
 
