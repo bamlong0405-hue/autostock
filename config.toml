@@ -19,3 +19,29 @@ yahoo = []                    # 해외 심볼
 exclude_etf_etn_spac = true   # 이름 기반 간단 제외
 max_symbols = 0               # 0=무제한 (테스트시에는 50~200 권장)
 name_filters_exclude = ["ETF","ETN","스팩","SPAC"]
+
+[signals]
+# Williams %R
+williams_r_period = 14
+williams_r_buy  = -80
+williams_r_sell = -20
+
+# RSI
+rsi_period = 14
+rsi_buy  = 30
+rsi_sell = 70
+
+# OBV 추세 체크
+obv_trend_lookback = 10
+obv_slope_min = 0.0
+
+# 이동평균
+ma_short = 5
+ma_mid   = 20
+ma_long  = 60
+
+# 캔들/MA 조건
+use_bearish_candle = true
+use_bullish_candle = true
+require_above_ma20_for_buy = true
+require_below_ma20_for_sell = true
