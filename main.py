@@ -85,12 +85,32 @@ def main():
 
     if not results:
         html = "<html><body><h1>No data</h1></body></html>"
+        all_html = html
     else:
-        html = build_html_report(results, details, cfg)
+        # ① 전체 리포트 (모든 종목, HOLD 포함)
+        all_html = build_html_report(results, details, cfg)
 
+        # ② 메일용 리포트 (BUY/SELL만)
+        email_only = cfg.get("email_options", {}).get("email_only_signals", True)
+        max_email_charts = int(cfg.get("email_options", {}).get("max_email_charts", 80))
+
+        if email_only:
+            filtered = [r for r in results if str(r.get("signal")) in ("BUY","SELL")]
+            filtered_symbols = [r["symbol"] for r in filtered][:max_email_charts]
+            filtered_details = {sym: details[sym] for sym in filtered_symbols if sym in details}
+
+            if not filtered:
+                html = "<html><body><h1>No BUY/SELL signals today</h1></body></html>"
+            else:
+                html = build_html_report(filtered, filtered_details, cfg)
+        else:
+            html = all_html
+
+    # 파일 저장: 전체 리포트 (HOLD 포함 여부 옵션)
+    save_all = cfg.get("email_options", {}).get("include_hold_in_report", True)
     report_path = os.path.join(cfg['general']['output_dir'], cfg['general']['report_filename'])
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write(html)
+        f.write(all_html if save_all else html)
 
     smtp_user = cfg['email']['from_addr']
     app_password = os.environ.get("GMAIL_APP_PASSWORD", "")
