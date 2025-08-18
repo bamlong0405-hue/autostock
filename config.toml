@@ -45,3 +45,8 @@ use_bearish_candle = true
 use_bullish_candle = true
 require_above_ma20_for_buy = true
 require_below_ma20_for_sell = true
+
+[email_options]
+email_only_signals = true      # 메일에는 BUY/SELL만 포함
+max_email_charts   = 80        # 메일에 포함할 차트 최대 개수(과대용량 방지)
+include_hold_in_report = true  # 로컬 HTML 리포트엔 HOLD도 포함(원하면 false로)
