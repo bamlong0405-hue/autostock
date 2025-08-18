@@ -21,30 +21,35 @@ max_symbols = 0               # 0=무제한 (테스트시에는 50~200 권장)
 name_filters_exclude = ["ETF","ETN","스팩","SPAC"]
 
 [signals]
-# Williams %R
 williams_r_period = 14
 williams_r_buy  = -80
 williams_r_sell = -20
-
-# RSI
 rsi_period = 14
 rsi_buy  = 30
 rsi_sell = 70
-
-# OBV 추세 체크
 obv_trend_lookback = 10
 obv_slope_min = 0.0
-
-# 이동평균
 ma_short = 5
 ma_mid   = 20
 ma_long  = 60
-
-# 캔들/MA 조건
 use_bearish_candle = true
 use_bullish_candle = true
 require_above_ma20_for_buy = true
 require_below_ma20_for_sell = true
+
+[backtest]
+enabled = false
+lookback_days = 900
+market_filter_symbol = "069500"
+market_ma_days = 200
+liquidity_lookback = 20
+liquidity_min_avg_value = 500000000
+max_hold_days = 20
+atr_period = 14
+stop_atr_mult = 0.0
+trail_atr_mult = 0.0
+cost_bps_per_side = 25
+summary_top_n = 50
 
 [email_options]
 email_only_signals = true      # 메일엔 BUY/SELL만
