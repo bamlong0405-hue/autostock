@@ -13,6 +13,54 @@ from reporter import build_html_report
 from mailer import send_mail_html
 from backtest import simulate_symbol
 from bt_reporter import save_backtest_outputs
+# main.py (상단 import에 추가)
+from fundamentals import fetch_fundamental_map
+from news import fetch_news_headlines
+from dart_client import latest_filings
+
+# main() 내부, results/feats_map/details/df_map 등을 만든 뒤
+# ---- 펀더멘털/뉴스/공시 수집 ----
+try:
+    krx_tickers = [r["symbol"] for r in results if r.get("market") == "KRX"]
+    funda_map = fetch_fundamental_map(krx_tickers)  # {'000660': {'PER':..,'PBR':..,'DIV':..}, ...}
+except Exception:
+    funda_map = {}
+
+# info 확장 (PER/PBR/DIV)
+for r in results:
+    if r.get("market") == "KRX":
+        t = r.get("symbol")
+        if t in funda_map:
+            r.update({
+                "per": funda_map[t].get("PER"),
+                "pbr": funda_map[t].get("PBR"),
+                "div": funda_map[t].get("DIV"),
+            })
+
+# BUY만 뉴스/공시(용량 제한)
+aux_info = {}  # { symbol: {"news":[...], "filings":[...]} }
+try:
+    email_opts = cfg.get("email_options", {})
+    max_news = int(email_opts.get("max_news_per_symbol", 3))
+    max_filings = int(email_opts.get("max_filings_per_symbol", 3))
+except Exception:
+    max_news, max_filings = 3, 3
+
+for r in results:
+    if str(r.get("signal")).upper() != "BUY":
+        continue
+    sym = r["symbol"]
+    name = r.get("name") or sym
+    # 뉴스: 회사명으로 검색 (Google News RSS)
+    news_items = fetch_news_headlines(name, max_items=max_news, lang="ko")
+    # 공시: OpenDART (환경변수 DART_API_KEY 세팅 시)
+    filings = latest_filings(name, max_items=max_filings)
+    if news_items or filings:
+        aux_info[sym] = {"news": news_items, "filings": filings}
+
+# aux_info를 첨부 리포트 생성 쪽에 전달하도록 변경
+# (아래 report_attach.build_buy_attachment 호출부를 수정)
+
 
 def get_name(symbol: str, market: str) -> str:
     if market == "KRX":
