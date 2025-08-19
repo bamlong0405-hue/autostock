@@ -1,9 +1,10 @@
+# main.py
 import os
 import sys
 import toml
 import pandas as pd
-from report_attach import build_buy_attachment
 from datetime import datetime
+
 from data_sources import (
     fetch_krx, fetch_yahoo, date_range_for_lookback,
     get_all_krx_tickers, get_krx_name
@@ -11,61 +12,23 @@ from data_sources import (
 from strategy import build_features, generate_signal
 from reporter import build_html_report
 from mailer import send_mail_html
+
+# (옵션) 백테스트
 from backtest import simulate_symbol
 from bt_reporter import save_backtest_outputs
-# main.py (상단 import에 추가)
+
+# 펀더멘털/뉴스/공시
+from report_attach import build_buy_attachment
 from fundamentals import fetch_fundamental_map
 from news import fetch_news_headlines
 from dart_client import latest_filings
-
-# main() 내부, results/feats_map/details/df_map 등을 만든 뒤
-# ---- 펀더멘털/뉴스/공시 수집 ----
-try:
-    krx_tickers = [r["symbol"] for r in results if r.get("market") == "KRX"]
-    funda_map = fetch_fundamental_map(krx_tickers)  # {'000660': {'PER':..,'PBR':..,'DIV':..}, ...}
-except Exception:
-    funda_map = {}
-
-# info 확장 (PER/PBR/DIV)
-for r in results:
-    if r.get("market") == "KRX":
-        t = r.get("symbol")
-        if t in funda_map:
-            r.update({
-                "per": funda_map[t].get("PER"),
-                "pbr": funda_map[t].get("PBR"),
-                "div": funda_map[t].get("DIV"),
-            })
-
-# BUY만 뉴스/공시(용량 제한)
-aux_info = {}  # { symbol: {"news":[...], "filings":[...]} }
-try:
-    email_opts = cfg.get("email_options", {})
-    max_news = int(email_opts.get("max_news_per_symbol", 3))
-    max_filings = int(email_opts.get("max_filings_per_symbol", 3))
-except Exception:
-    max_news, max_filings = 3, 3
-
-for r in results:
-    if str(r.get("signal")).upper() != "BUY":
-        continue
-    sym = r["symbol"]
-    name = r.get("name") or sym
-    # 뉴스: 회사명으로 검색 (Google News RSS)
-    news_items = fetch_news_headlines(name, max_items=max_news, lang="ko")
-    # 공시: OpenDART (환경변수 DART_API_KEY 세팅 시)
-    filings = latest_filings(name, max_items=max_filings)
-    if news_items or filings:
-        aux_info[sym] = {"news": news_items, "filings": filings}
-
-# aux_info를 첨부 리포트 생성 쪽에 전달하도록 변경
-# (아래 report_attach.build_buy_attachment 호출부를 수정)
 
 
 def get_name(symbol: str, market: str) -> str:
     if market == "KRX":
         return get_krx_name(symbol)
     return symbol
+
 
 def analyze_symbol(symbol: str, market: str, cfg: dict):
     lb = cfg['general']['lookback_days']
@@ -77,7 +40,7 @@ def analyze_symbol(symbol: str, market: str, cfg: dict):
         df = fetch_yahoo(symbol, yah_start, yah_end)
 
     if df.empty or len(df) < max(60, lb // 2):
-        return pd.DataFrame(), {}, df  # ← df 같이 반환
+        return pd.DataFrame(), {}, df  # df 같이 반환
 
     feat = build_features(df, cfg)
     feat['Signal'] = generate_signal(feat, cfg)
@@ -95,6 +58,7 @@ def analyze_symbol(symbol: str, market: str, cfg: dict):
     }
     return feat, info, df
 
+
 def load_universe(cfg: dict):
     uv = cfg.get('universe', {})
     krx_mode = uv.get('krx_mode', 'LIST').upper()
@@ -111,12 +75,12 @@ def load_universe(cfg: dict):
     yah = uv.get('yahoo', [])
     return krx_codes, yah
 
+
 def maybe_run_backtest(cfg: dict, feats_map: dict, df_map: dict):
     bt = cfg.get('backtest', {})
     if not bt.get('enabled', False):
         return None
 
-    # 시장 필터용 심볼 DF 만들기
     lb = int(bt.get('lookback_days', 900))
     m_symbol = bt.get('market_filter_symbol', '069500')
     m_df = df_map.get(m_symbol)
@@ -172,6 +136,7 @@ def maybe_run_backtest(cfg: dict, feats_map: dict, df_map: dict):
     csv_path, html_path = save_backtest_outputs(results, outdir, top_n=top_n)
     return {"csv": csv_path, "html": html_path, "count": len(results)}
 
+
 def main():
     cfg = toml.load("config.toml")
     os.makedirs(cfg['general']['output_dir'], exist_ok=True)
@@ -209,6 +174,45 @@ def main():
             details[sym] = feat[save_cols].copy()
             feats_map[sym] = feat
             df_map[sym] = df
+
+    # ---------- (여기서부터 추가) 펀더멘털/뉴스/공시 수집 ----------
+    aux_info = {}  # { symbol: {"news":[...], "filings":[...] } }
+
+    # PER/PBR/DIV 붙이기 (KRX만)
+    try:
+        krx_tickers = [r["symbol"] for r in results if r.get("market") == "KRX"]
+        funda_map = fetch_fundamental_map(krx_tickers)  # {'000660': {'PER':..,'PBR':..,'DIV':..}, ...}
+    except Exception:
+        funda_map = {}
+
+    for r in results:
+        if r.get("market") == "KRX":
+            t = r.get("symbol")
+            if t in funda_map:
+                r.update({
+                    "per": funda_map[t].get("PER"),
+                    "pbr": funda_map[t].get("PBR"),
+                    "div": funda_map[t].get("DIV"),
+                })
+
+    # BUY 종목만 뉴스/공시 (용량 관리)
+    try:
+        email_opts = cfg.get("email_options", {})
+        max_news = int(email_opts.get("max_news_per_symbol", 3))
+        max_filings = int(email_opts.get("max_filings_per_symbol", 3))
+    except Exception:
+        max_news, max_filings = 3, 3
+
+    for r in results:
+        if str(r.get("signal")).upper() != "BUY":
+            continue
+        sym = r["symbol"]
+        name = r.get("name") or sym
+        news_items = fetch_news_headlines(name, max_items=max_news, lang="ko")
+        filings = latest_filings(name, max_items=max_filings)
+        if news_items or filings:
+            aux_info[sym] = {"news": news_items, "filings": filings}
+    # ---------- (추가 끝) -------------------------------------------
 
     # ---------- 리포트 생성 ----------
     if not results:
@@ -274,7 +278,7 @@ def main():
     max_buy_charts    = int(email_opts.get("max_buy_charts", 10))
     attachment_paths  = []
 
-    # BUY만 추려서 소형 차트+근거 HTML 첨부 생성
+    # BUY만 추려서 소형 차트+근거+리뷰+뉴스/공시 첨부 생성
     if attach_buy_report:
         buy_rows = [r for r in results if str(r.get("signal")).upper() == "BUY"]
         if buy_rows:
@@ -285,6 +289,7 @@ def main():
                     cfg=cfg,
                     out_path=f"{cfg['general']['output_dir'].rstrip('/')}/buy_report.html",
                     max_charts=max_buy_charts,
+                    aux_info=aux_info,  # ← 전달 추가
                 )
                 attachment_paths.append(attach_path)
             except Exception as e:
@@ -292,8 +297,8 @@ def main():
 
     # 요약 로그
     total = len(results)
-    buys  = sum(1 for r in results if str(r.get("signal")).upper()=="BUY")
-    sells = sum(1 for r in results if str(r.get("signal")).upper()=="SELL")
+    buys  = sum(1 for r in results if str(r.get("signal")).upper() == "BUY")
+    sells = sum(1 for r in results if str(r.get("signal")).upper() == "SELL")
     holds = total - buys - sells
     print(f"[SUMMARY] total={total}, BUY={buys}, SELL={sells}, HOLD={holds}")
 
