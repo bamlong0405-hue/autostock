@@ -38,7 +38,7 @@ name_filters_exclude = ["ETF","ETN","스팩","SPAC"]
 # 전략 모드 선택
 # =========================
 [mode]
-signal_mode = "blog"              # "default" | "blog"
+signal_mode = "default"              # "default" | "blog"
 
 # -------------------------
 # 블로그 전략 파라미터
