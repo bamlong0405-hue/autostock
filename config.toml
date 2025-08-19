@@ -52,7 +52,7 @@ cost_bps_per_side = 25
 summary_top_n = 50
 
 [email_options]
-email_only_signals = true      # 메일엔 BUY/SELL만
+email_only_signals = false      # 메일엔 BUY/SELL만
 include_charts      = false    # ✅ 메일 본문 차트 제외
 max_email_charts    = 0        # 차트 0개(보내지 않음)
 max_email_rows      = 300      # ✅ 메일 표 최대 행수 (필요시 200~500 사이 권장)
