@@ -38,7 +38,7 @@ name_filters_exclude = ["ETF","ETN","스팩","SPAC"]
 # 전략 모드 선택
 # =========================
 [mode]
-signal_mode = "default"              # "default" | "blog"
+signal_mode = "blog"              # "default" | "blog"
 
 # -------------------------
 # 블로그 전략 파라미터
@@ -47,7 +47,7 @@ signal_mode = "default"              # "default" | "blog"
 [blog_signals]
 # RSI 다이버전스
 rsi_period           = 14
-divergence_lookback  = 40
+divergence_lookback  = 30
 div_half_window      = 20
 
 # MACD
@@ -56,8 +56,8 @@ macd_slow   = 26
 macd_signal = 9
 
 # 캔들/거래량
-require_bullish_engulfing = true
-require_volume_surge      = true
+require_bullish_engulfing = false
+require_volume_surge      = false
 volume_surge_multiplier   = 1.5
 
 # (선택) 매도도 엄격 적용하려면 아래 true 로
