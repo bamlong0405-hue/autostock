@@ -24,6 +24,8 @@ include_charts           = false  # 메일 차트 제외
 max_email_charts         = 0
 max_email_rows           = 300
 include_hold_in_report   = true   # 저장되는 daily_report.html에는 HOLD 포함
+attach_buy_report = true
+max_buy_charts = 8   # 첨부 리포트에 포함할 최대 차트 수 (용량 보호)
 
 [universe]
 # 코스피+코스닥 전체
