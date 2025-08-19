@@ -2,6 +2,7 @@ import os
 import sys
 import toml
 import pandas as pd
+from report_attach import build_buy_attachment
 from datetime import datetime
 from data_sources import (
     fetch_krx, fetch_yahoo, date_range_for_lookback,
@@ -139,7 +140,10 @@ def main():
         feat, info, df = analyze_symbol(sym, "KRX", cfg)
         if not feat.empty:
             results.append(info)
-            details[sym] = feat[['Close','MA_M']].copy()
+            save_cols = [c for c in [
+    'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope','Bullish','Bearish','Bull_Engulf'
+] if c in feat.columns]
+details[sym] = feat[save_cols].copy()
             feats_map[sym] = feat
             df_map[sym] = df
         if i % 200 == 0:
@@ -150,7 +154,10 @@ def main():
         feat, info, df = analyze_symbol(sym, "YAHOO", cfg)
         if not feat.empty:
             results.append(info)
-            details[sym] = feat[['Close','MA_M']].copy()
+            save_cols = [c for c in [
+    'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope','Bullish','Bearish','Bull_Engulf'
+] if c in feat.columns]
+details[sym] = feat[save_cols].copy()
             feats_map[sym] = feat
             df_map[sym] = df
 
@@ -215,47 +222,78 @@ def main():
         print(f"[Backtest] Summary CSV: {bt_outputs['csv']}")
         print(f"[Backtest] Summary HTML: {bt_outputs['html']}")
 
-    # ---------- 메일 전송 (용량 초과시 폴백) ----------
-    smtp_user = cfg['email']['from_addr']
-    app_password = os.environ.get("GMAIL_APP_PASSWORD", "")
-    if not app_password:
-        print("ERROR: GMAIL_APP_PASSWORD env not set", file=sys.stderr)
-        sys.exit(1)
+# ---------- 파일 저장 (전체 리포트) ----------
+save_all = cfg.get("email_options", {}).get("include_hold_in_report", True)
+report_path = os.path.join(cfg['general']['output_dir'], cfg['general']['report_filename'])
+with open(report_path, "w", encoding="utf-8") as f:
+    f.write(all_html if save_all else html)
 
+# ---------- 메일 전송 준비 (첨부 리포트 생성) ----------
+smtp_user = cfg['email']['from_addr']
+app_password = os.environ.get("GMAIL_APP_PASSWORD", "")
+if not app_password:
+    print("ERROR: GMAIL_APP_PASSWORD env not set", file=sys.stderr)
+    sys.exit(1)
+
+# 첨부 옵션
+email_opts = cfg.get("email_options", {})
+attach_buy_report = bool(email_opts.get("attach_buy_report", True))
+max_buy_charts    = int(email_opts.get("max_buy_charts", 10))
+attachment_paths  = []
+
+# BUY만 추려서 소형 차트+근거 HTML 첨부 생성
+if attach_buy_report:
+    buy_rows = [r for r in results if str(r.get("signal")).upper() == "BUY"]
+    if buy_rows:
+        try:
+            attach_path = build_buy_attachment(
+                buy_rows=buy_rows,
+                details=details,
+                cfg=cfg,
+                out_path=f"{cfg['general']['output_dir'].rstrip('/')}/buy_report.html",
+                max_charts=max_buy_charts,
+            )
+            attachment_paths.append(attach_path)
+        except Exception as e:
+            print(f"[WARN] build_buy_attachment failed: {e}")
+
+# ---------- 메일 전송 ----------
+try:
+    send_mail_html(
+        smtp_user=smtp_user,
+        app_password=app_password,
+        to_addrs=cfg['email']['to_addrs'],
+        subject=cfg['email']['subject'],
+        html=html,
+        from_name=cfg['email']['from_name'],
+        attachments=attachment_paths if attachment_paths else None
+    )
+except Exception as e:
+    # 552 등 용량 에러 폴백: 표만, 150행 제한, 차트/첨부 없음
+    print(f"[WARN] email send failed: {e}")
+    fallback_html = build_html_report(
+        [r for r in results if str(r.get("signal")) in ("BUY","SELL")],
+        {},
+        cfg,
+        show_charts=False,
+        max_table_rows=150
+    )
     try:
         send_mail_html(
             smtp_user=smtp_user,
             app_password=app_password,
             to_addrs=cfg['email']['to_addrs'],
-            subject=cfg['email']['subject'],
-            html=html,
-            from_name=cfg['email']['from_name']
+            subject=cfg['email']['subject'] + " (fallback)",
+            html=fallback_html,
+            from_name=cfg['email']['from_name'],
+            attachments=None  # 용량 줄이기 위해 첨부 제거
         )
-    except Exception as e:
-        # 552 등 용량 에러 폴백: 표만, 150행 제한, 차트 없음
-        fallback_html = build_html_report(
-            [r for r in results if str(r.get("signal")) in ("BUY","SELL")],
-            {},
-            cfg,
-            show_charts=False,
-            max_table_rows=150,
-            title="BUY/SELL Signals (Fallback)"
-        )
-        try:
-            send_mail_html(
-                smtp_user=smtp_user,
-                app_password=app_password,
-                to_addrs=cfg['email']['to_addrs'],
-                subject=cfg['email']['subject'] + " (fallback)",
-                html=fallback_html,
-                from_name=cfg['email']['from_name']
-            )
-            print("Sent fallback email (reduced size).")
-        except Exception as e2:
-            print(f"Email failed even after fallback: {e2}", file=sys.stderr)
-            sys.exit(1)
+        print("Sent fallback email (reduced size).")
+    except Exception as e2:
+        print(f"Email failed even after fallback: {e2}", file=sys.stderr)
+        sys.exit(1)
 
-    print(f"Report written: {report_path} ({datetime.now()})")
+print(f"Report written: {report_path} ({datetime.now()})")
 
 if __name__ == "__main__":
     main()
