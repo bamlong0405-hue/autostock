@@ -1,60 +1,112 @@
+# =========================
+# AutoStock Config (KST)
+# =========================
+
 [general]
-timezone = "Asia/Seoul"
-output_dir = "output"
+timezone        = "Asia/Seoul"
+output_dir      = "output"
 report_filename = "daily_report.html"
-chart_dir = "charts"
-lookback_days = 200
+chart_dir       = "charts"
+lookback_days   = 200          # 분석용 데이터 기간(영업일 기준 아님)
 
 [email]
 from_name = "AutoStock Bot"
-from_addr = "bamlong0405@gmail.com"
-to_addrs = ["bamlong0405@gmail.com"]
-subject = "[AutoStock] Daily Signals"
+from_addr = "bamlong0405@gmail.com"      # ← 발신 Gmail 주소
+to_addrs  = ["bamlong0405@gmail.com"]   # ← 수신자(복수 가능)
+subject   = "[AutoStock] Daily Signals"
+
+# 메일 발송은 GitHub Secrets 의 GMAIL_APP_PASSWORD 를 사용합니다.
+# (앱 비밀번호 필수 / 계정 2단계 인증 필요)
+
+[email_options]
+email_only_signals       = true   # 메일엔 BUY/SELL만 (용량 절감)
+include_charts           = false  # 메일 차트 제외
+max_email_charts         = 0
+max_email_rows           = 300
+include_hold_in_report   = true   # 저장되는 daily_report.html에는 HOLD 포함
 
 [universe]
-krx_mode = "ALL"              # "ALL" -> KOSPI+KOSDAQ 전체 자동 로드, "LIST" -> 아래 krx 리스트 사용
-krx = []                      # krx_mode="LIST"일 때만 사용
-yahoo = []                    # 해외 심볼
-
-exclude_etf_etn_spac = true   # 이름 기반 간단 제외
-max_symbols = 0               # 0=무제한 (테스트시에는 50~200 권장)
+# 코스피+코스닥 전체
+krx_mode = "ALL"                  # LIST | ALL
+krx = []                          # LIST 일 때만 사용
+yahoo = []                        # 해외 종목 사용 시 추가
+exclude_etf_etn_spac = true       # ETF/ETN/스팩 제외
+max_symbols = 0                   # 0=제한 없음 (초기 점검 시 200 같은 값 권장)
 name_filters_exclude = ["ETF","ETN","스팩","SPAC"]
 
+# =========================
+# 전략 모드 선택
+# =========================
+[mode]
+signal_mode = "blog"              # "default" | "blog"
+
+# -------------------------
+# 블로그 전략 파라미터
+# (RSI 다이버전스 + MACD + 장악형 + 거래량)
+# -------------------------
+[blog_signals]
+# RSI 다이버전스
+rsi_period           = 14
+divergence_lookback  = 40
+div_half_window      = 20
+
+# MACD
+macd_fast   = 12
+macd_slow   = 26
+macd_signal = 9
+
+# 캔들/거래량
+require_bullish_engulfing = true
+require_volume_surge      = true
+volume_surge_multiplier   = 1.5
+
+# (선택) 매도도 엄격 적용하려면 아래 true 로
+# require_bearish_engulfing = false
+# require_volume_surge_for_sell = false
+
+# -------------------------
+# 기본(기존) 전략 파라미터
+# (signal_mode="default" 일 때 사용 / blog 모드에도 피처 계산에 일부 활용)
+# -------------------------
 [signals]
 williams_r_period = 14
-williams_r_buy  = -80
+williams_r_buy  = -85
 williams_r_sell = -20
+
 rsi_period = 14
-rsi_buy  = 30
+rsi_buy  = 35
 rsi_sell = 70
+
 obv_trend_lookback = 10
-obv_slope_min = 0.0
+obv_slope_min = -0.0001          # 거의 해제 수준. 보수적으로 하려면 0.0
+
 ma_short = 5
 ma_mid   = 20
 ma_long  = 60
-use_bearish_candle = true
-use_bullish_candle = true
-require_above_ma20_for_buy = true
-require_below_ma20_for_sell = true
 
+# 캔들/MA는 기본 전략에서 '가점'으로만 쓰도록 권장
+use_bullish_candle = false
+use_bearish_candle = false
+require_above_ma20_for_buy = false
+require_below_ma20_for_sell = false
+
+# 점수식 임계값 (default 모드 전용)
+buy_score_threshold  = 2
+sell_score_threshold = 2
+
+# =========================
+# 백테스트(옵션)
+# =========================
 [backtest]
-enabled = false
-lookback_days = 900
-market_filter_symbol = "069500"
+enabled = false                 # true 로 켜면 시간 오래 걸림
+lookback_days = 900             # 백테스트 기간(대략 3~4년)
+market_filter_symbol = "069500" # 코스피200 ETF 등 시장 필터 프록시
 market_ma_days = 200
 liquidity_lookback = 20
-liquidity_min_avg_value = 500000000
+liquidity_min_avg_value = 500000000   # 20일 평균 거래대금(원) 컷 (예: 5억)
 max_hold_days = 20
 atr_period = 14
-stop_atr_mult = 0.0
-trail_atr_mult = 0.0
-cost_bps_per_side = 25
+stop_atr_mult = 0.0             # 0=미사용 (예: 2.5 설정 가능)
+trail_atr_mult = 0.0            # 0=미사용
+cost_bps_per_side = 25          # 편도 수수료(bps) 25=0.25%
 summary_top_n = 50
-
-[email_options]
-email_only_signals = false      # 메일엔 BUY/SELL만
-include_charts      = false    # ✅ 메일 본문 차트 제외
-max_email_charts    = 0        # 차트 0개(보내지 않음)
-max_email_rows      = 300      # ✅ 메일 표 최대 행수 (필요시 200~500 사이 권장)
-include_hold_in_report = true  # 로컬/아티팩트 보고서는 HOLD 포함
-split_emails        = false    # (옵션) 여러 통으로 쪼개 전송할지
