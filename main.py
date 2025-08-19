@@ -143,7 +143,7 @@ def main():
             save_cols = [c for c in [
     'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope','Bullish','Bearish','Bull_Engulf'
 ] if c in feat.columns]
-details[sym] = feat[save_cols].copy()
+            details[sym] = feat[save_cols].copy()
             feats_map[sym] = feat
             df_map[sym] = df
         if i % 200 == 0:
@@ -157,7 +157,7 @@ details[sym] = feat[save_cols].copy()
             save_cols = [c for c in [
     'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope','Bullish','Bearish','Bull_Engulf'
 ] if c in feat.columns]
-details[sym] = feat[save_cols].copy()
+            details[sym] = feat[save_cols].copy()
             feats_map[sym] = feat
             df_map[sym] = df
 
