@@ -7,3 +7,5 @@ lxml
 html5lib
 requests
 toml
+feedparser
+xmltodict
