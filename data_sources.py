@@ -56,3 +56,49 @@ def get_krx_name(code: str) -> str:
         return stock.get_market_ticker_name(code)
     except Exception:
         return code
+
+# ---- Turnover helpers (append to data_sources.py) ----
+from pykrx import stock
+import pandas as pd
+from datetime import datetime
+
+def get_board_sets(ref_date: str | None = None):
+    """
+    코스피/코스닥 티커 집합 (6자리 문자열)
+    """
+    if ref_date is None:
+        ref_date = datetime.now().strftime("%Y%m%d")
+    kospi = set(stock.get_market_ticker_list(ref_date, market="KOSPI"))
+    kosdaq = set(stock.get_market_ticker_list(ref_date, market="KOSDAQ"))
+    return kospi, kosdaq
+
+def attach_turnover_krx(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """
+    df: fetch_krx(symbol, ...) 결과 (DatetimeIndex, 'Close','Volume' 포함)
+    symbol: '005930' 같은 6자리
+    반환: df에 'MCap','Turnover' 추가 (Turnover = (Close*Volume)/MCap)
+    """
+    if df is None or df.empty:
+        return df.copy()
+
+    idx = pd.to_datetime(df.index)
+    dates = [d.strftime("%Y%m%d") for d in idx]
+    caps = []
+    for d in dates:
+        try:
+            mc = stock.get_market_cap_by_ticker(d)  # 해당 일자 시총 스냅샷
+            mcap = int(mc.loc[symbol, "시가총액"]) if symbol in mc.index else None
+        except Exception:
+            mcap = None
+        caps.append((d, mcap))
+
+    cap_df = pd.DataFrame(caps, columns=["date", "mcap"])
+    cap_df["date"] = pd.to_datetime(cap_df["date"])
+    cap_df = cap_df.set_index("date")
+
+    out = df.copy()
+    out.index = pd.to_datetime(out.index)
+    out["MCap"] = cap_df["mcap"].reindex(out.index)
+    out["Turnover"] = (out["Close"] * out["Volume"]) / out["MCap"]
+    out.loc[(out["MCap"] <= 0) | (out["MCap"].isna()), "Turnover"] = pd.NA
+    return out
