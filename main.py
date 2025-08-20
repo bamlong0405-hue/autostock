@@ -8,6 +8,7 @@ from datetime import datetime
 from data_sources import (
     fetch_krx, fetch_yahoo, date_range_for_lookback,
     get_all_krx_tickers, get_krx_name
+    get_board_sets, attach_turnover_krx
 )
 from strategy import build_features, generate_signal
 from reporter import build_html_report
@@ -36,13 +37,17 @@ def analyze_symbol(symbol: str, market: str, cfg: dict):
 
     if market == "KRX":
         df = fetch_krx(symbol, krx_start, krx_end)
+        try:
+            df = attach_turnover_krx(df, symbol)   # ← 추가
+        except Exception:
+            pass
     else:
         df = fetch_yahoo(symbol, yah_start, yah_end)
 
     if df.empty or len(df) < max(60, lb // 2):
-        return pd.DataFrame(), {}, df  # df 같이 반환
+        return pd.DataFrame(), {}, df
 
-    feat = build_features(df, cfg)
+    feat = build_features(df, cfg)  # (여기서 BB_* 컬럼 계산됨)
     feat['Signal'] = generate_signal(feat, cfg)
     latest = feat.dropna().iloc[-1]
 
@@ -149,19 +154,56 @@ def main():
     feats_map = {}
     df_map = {}
 
+    # 코스피/코스닥 집합 (회전율 임계값 분리용)
+    kospi_set, kosdaq_set = get_board_sets()
+
+    results, details, feats_map, df_map = [], {}, {}, {}
+
     # --- KRX ---
     for i, sym in enumerate(krx_codes, 1):
         feat, info, df = analyze_symbol(sym, "KRX", cfg)
         if not feat.empty:
-            results.append(info)
-            save_cols = [c for c in [
-                'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope','Bullish','Bearish','Bull_Engulf'
-            ] if c in feat.columns]
-            details[sym] = feat[save_cols].copy()
-            feats_map[sym] = feat
-            df_map[sym] = df
+            use_to = cfg.get("liquidity", {}).get("use_turnover_filter", True)
+            if use_to:
+                td = int(cfg["liquidity"].get("turnover_days", 20))
+                avg_to = None
+                if isinstance(df, pd.DataFrame) and ("Turnover" in df.columns):
+                    avg_to = df["Turnover"].tail(td).mean(skipna=True)
+
+                if sym in kospi_set:
+                    th = float(cfg["liquidity"].get("kospi_min_turnover_daily", 0.005))
+                elif sym in kosdaq_set:
+                    th = float(cfg["liquidity"].get("kosdaq_min_turnover_daily", 0.01))
+                else:
+                    th = float(cfg["liquidity"].get("kospi_min_turnover_daily", 0.005))
+
+                if (avg_to is None) or pd.isna(avg_to) or (avg_to < th):
+                    pass  # 회전율 미달 → 제외
+                else:
+                    results.append(info)
+                    save_cols = [c for c in [
+                        'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope',
+                        'Bullish','Bearish','Bull_Engulf',
+                        # 리포트 참고용 BB 컬럼
+                        'BB_MID','BB_UPPER','BB_LOWER','BB_WIDTH','BB_POS_PCT'
+                    ] if c in feat.columns]
+                    details[sym] = feat[save_cols].copy()
+                    feats_map[sym] = feat
+                    df_map[sym] = df
+            else:
+                results.append(info)
+                save_cols = [c for c in [
+                    'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope',
+                    'Bullish','Bearish','Bull_Engulf',
+                    'BB_MID','BB_UPPER','BB_LOWER','BB_WIDTH','BB_POS_PCT'
+                ] if c in feat.columns]
+                details[sym] = feat[save_cols].copy()
+                feats_map[sym] = feat
+                df_map[sym] = df
+
         if i % 200 == 0:
             print(f"[KRX] processed {i}/{len(krx_codes)}")
+
 
     # --- Yahoo (선택) ---
     for sym in yah_codes:
