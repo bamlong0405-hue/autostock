@@ -55,7 +55,7 @@ def build_buy_attachment(
     cfg: dict,
     out_path: str = "output/buy_report.html",
     max_charts: int = 10,
-    aux_info: Optional[Dict[str, Any]] = None,  # ← 뉴스/공시 전달
+    aux_info: Optional[Dict[str, Any]] = None,  # 뉴스/공시 전달
 ) -> str:
     """
     buy_rows: signal == BUY 인 종목 dict 리스트
@@ -77,7 +77,7 @@ def build_buy_attachment(
         if isinstance(df, pd.DataFrame) and not df.empty:
             chart_uri = _small_price_chart(df, f"{name} ({sym})")
 
-        # 기본 지표
+        # 기본 지표 요약 (메일 본문 요약용)
         rsi = r.get("rsi", None)
         wr  = r.get("wr", None)
         gap = r.get("ma20_gap_pct", None)
@@ -91,8 +91,14 @@ def build_buy_attachment(
         if gap is not None:
             reasons.append(f"20일선 괴리 {float(gap):.2f}% — 과열/과매도 판단 근거")
 
+        # 상세 피처에서 추가 근거
         if isinstance(df, pd.DataFrame) and not df.empty:
             last = df.iloc[-1]
+
+            # 볼린저밴드 위치(리포트 참고용)
+            if "BB_POS_PCT" in df.columns and pd.notna(last.get("BB_POS_PCT", None)):
+                reasons.append(f"볼린저밴드 위치 {float(last['BB_POS_PCT']):.1f}% — 0% 하단, 100% 상단")
+
             if "OBV_slope" in df.columns and pd.notna(last.get("OBV_slope", None)):
                 reasons.append(f"OBV 추세(slope) {float(last['OBV_slope']):.5f} — 수급 흐름 참고")
             if "Bull_Engulf" in df.columns and bool(last.get("Bull_Engulf", False)):
@@ -138,8 +144,8 @@ def build_buy_attachment(
             html.append("<div style='font-weight:600;margin-bottom:6px'>최근 뉴스</div><ul style='margin:0 0 0 18px;padding:0'>")
             for it in aux_info[sym]["news"]:
                 title = it.get("title", "")
-                link = it.get("link", "#")
-                pub  = it.get("published", "")
+                link  = it.get("link", "#")
+                pub   = it.get("published", "")
                 html.append(f"<li style='margin:2px 0'><a href='{link}' target='_blank'>{title}</a> "
                             f"<span style='color:#888'>({pub})</span></li>")
             html.append("</ul></div>")
