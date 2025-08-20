@@ -7,8 +7,7 @@ from datetime import datetime
 
 from data_sources import (
     fetch_krx, fetch_yahoo, date_range_for_lookback,
-    get_all_krx_tickers, get_krx_name
-    get_board_sets, attach_turnover_krx
+    get_all_krx_tickers, get_krx_name, get_board_sets, attach_turnover_krx
 )
 from strategy import build_features, generate_signal
 from reporter import build_html_report
