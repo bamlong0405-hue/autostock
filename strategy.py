@@ -79,7 +79,7 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         if col not in out.columns and col in df.columns:
             out[col] = df[col]
 
-    # --- 블로그 모드용 보조지표 추가 (MACD/거래량 평균)
+    # --- 블로그 모드용 보조지표 (MACD/거래량 평균) ---
     bcfg = cfg.get('blog_signals', {})
     m_fast = int(bcfg.get('macd_fast', 12))
     m_slow = int(bcfg.get('macd_slow', 26))
@@ -95,6 +95,25 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     # 블로그 모드용 캔들(장악형)
     out['Bull_Engulf'] = bullish_engulfing(out)
     out['Bear_Engulf'] = bearish_engulfing(out)
+
+    # --- Bollinger Bands (report 참고용) ---
+    bb_cfg = cfg.get('bbands', {})
+    if bb_cfg.get('enabled', True):
+        n = int(bb_cfg.get('period', 20))
+        k = float(bb_cfg.get('stdev', 2.0))
+        roll = out['Close'].rolling(window=n, min_periods=n)
+        ma = roll.mean()
+        std = roll.std()
+
+        out['BB_MID']   = ma
+        out['BB_UPPER'] = ma + k * std
+        out['BB_LOWER'] = ma - k * std
+        # 분모 0 방지
+        with np.errstate(invalid='ignore', divide='ignore'):
+            out['BB_WIDTH'] = (out['BB_UPPER'] - out['BB_LOWER']) / ma
+            band = (out['BB_UPPER'] - out['BB_LOWER'])
+            pos = (out['Close'] - out['BB_LOWER']) / band * 100.0
+        out['BB_POS_PCT'] = pos.clip(lower=0, upper=100)
 
     return out
 
