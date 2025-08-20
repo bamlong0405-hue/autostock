@@ -112,3 +112,14 @@ stop_atr_mult = 0.0             # 0=미사용 (예: 2.5 설정 가능)
 trail_atr_mult = 0.0            # 0=미사용
 cost_bps_per_side = 25          # 편도 수수료(bps) 25=0.25%
 summary_top_n = 50
+
+[liquidity]
+use_turnover_filter = true      # 회전율 필터 사용
+turnover_days = 20              # 최근 N일 평균 회전율
+kospi_min_turnover_daily  = 0.005   # 코스피 0.5%
+kosdaq_min_turnover_daily = 0.01    # 코스닥 1.0%
+
+[bbands]            # 볼린저밴드: 리포트 참고용
+enabled = true
+period  = 20
+stdev   = 2.0
