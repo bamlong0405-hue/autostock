@@ -11,46 +11,49 @@ lookback_days   = 200          # 분석용 데이터 기간(영업일 기준 아
 
 [email]
 from_name = "AutoStock Bot"
-from_addr = "bamlong0405@gmail.com"      # ← 발신 Gmail 주소
-to_addrs  = ["bamlong0405@gmail.com"]   # ← 수신자(복수 가능)
+from_addr = "bamlong0405@gmail.com"      # 발신 Gmail 주소
+to_addrs  = ["bamlong0405@gmail.com"]   # 수신자(복수 가능)
 subject   = "[AutoStock] Daily Signals"
 
-# 메일 발송은 GitHub Secrets 의 GMAIL_APP_PASSWORD 를 사용합니다.
-# (앱 비밀번호 필수 / 계정 2단계 인증 필요)
-
 [email_options]
-email_only_signals       = true   # 메일엔 BUY/SELL만 (용량 절감)
-include_charts           = false  # 메일 차트 제외
-max_email_charts         = 0
-max_email_rows           = 300
-include_hold_in_report   = true   # 저장되는 daily_report.html에는 HOLD 포함
-attach_buy_report = true
-max_buy_charts = 8   # 첨부 리포트에 포함할 최대 차트 수 (용량 보호)
+email_only_signals     = true   # 메일엔 BUY/SELL만 (용량 절감)
+include_charts         = false  # 메일 차트 제외
+max_email_charts       = 0
+max_email_rows         = 300
+include_hold_in_report = true   # 저장되는 daily_report.html에는 HOLD 포함
+attach_buy_report      = true   # 별도 BUY Report 첨부
+max_buy_charts         = 10
 
+# =========================
+# 종목 유니버스
+# =========================
 [universe]
-# 코스피+코스닥 전체
 krx_mode = "ALL"                  # LIST | ALL
 krx = []                          # LIST 일 때만 사용
 yahoo = []                        # 해외 종목 사용 시 추가
 exclude_etf_etn_spac = true       # ETF/ETN/스팩 제외
-max_symbols = 0                   # 0=제한 없음 (초기 점검 시 200 같은 값 권장)
+max_symbols = 0                   # 0=제한 없음 (초기 점검 시 200 권장)
 name_filters_exclude = ["ETF","ETN","스팩","SPAC"]
 
 # =========================
 # 전략 모드 선택
 # =========================
 [mode]
-signal_mode = "blog"              # "default" | "blog"
+signal_mode = "default"              # "default" | "blog"
 
-# -------------------------
-# 블로그 전략 파라미터
-# (RSI 다이버전스 + MACD + 장악형 + 거래량)
-# -------------------------
+# 레짐(시장 국면) 오버레이
+regime_symbol = "069500"             # KODEX200
+regime_ma_days = 200
+regime_disable_buy_in_bear = true    # 약세장에서는 BUY 신호 무효화
+
+# =========================
+# Blog 전략 파라미터
+# =========================
 [blog_signals]
 # RSI 다이버전스
-rsi_period           = 14
-divergence_lookback  = 30
-div_half_window      = 20
+rsi_period          = 14
+divergence_lookback = 30
+div_half_window     = 20
 
 # MACD
 macd_fast   = 12
@@ -62,64 +65,76 @@ require_bullish_engulfing = false
 require_volume_surge      = false
 volume_surge_multiplier   = 1.5
 
-# (선택) 매도도 엄격 적용하려면 아래 true 로
-# require_bearish_engulfing = false
-# require_volume_surge_for_sell = false
-
-# -------------------------
-# 기본(기존) 전략 파라미터
-# (signal_mode="default" 일 때 사용 / blog 모드에도 피처 계산에 일부 활용)
-# -------------------------
+# =========================
+# 기본(default) 전략 파라미터
+# =========================
 [signals]
 williams_r_period = 14
-williams_r_buy  = -85
-williams_r_sell = -20
+williams_r_buy    = -85
+williams_r_sell   = -20
 
 rsi_period = 14
-rsi_buy  = 35
-rsi_sell = 70
+rsi_buy    = 35
+rsi_sell   = 70
 
 obv_trend_lookback = 10
-obv_slope_min = -0.0001          # 거의 해제 수준. 보수적으로 하려면 0.0
+obv_slope_min      = -0.0001
 
 ma_short = 5
 ma_mid   = 20
 ma_long  = 60
 
-# 캔들/MA는 기본 전략에서 '가점'으로만 쓰도록 권장
-use_bullish_candle = false
-use_bearish_candle = false
+# 캔들/MA는 '가점'으로만 사용 권장
+use_bullish_candle       = false
+use_bearish_candle       = false
 require_above_ma20_for_buy = false
 require_below_ma20_for_sell = false
 
-# 점수식 임계값 (default 모드 전용)
+# 점수식 임계값
 buy_score_threshold  = 2
 sell_score_threshold = 2
 
+# 재진입 쿨다운
+cooldown_days = 5
+
 # =========================
-# 백테스트(옵션)
+# 필터
+# =========================
+[filters]
+# 회전율 필터(시총 대비 거래대금 %)
+use_turnover = true
+turnover_min_pct_kospi  = 0.15   # 코스피 0.15% 이상
+turnover_min_pct_kosdaq = 0.25   # 코스닥 0.25% 이상
+
+# =========================
+# 과밀매수 방지
+# =========================
+[overcrowd]
+enabled  = true
+max_buys = 120
+rank_metric = "turnover_pct"   # 랭킹 기준: turnover_pct | obv_slope | ma20_gap
+
+# =========================
+# 백테스트
 # =========================
 [backtest]
-enabled = false                 # true 로 켜면 시간 오래 걸림
-lookback_days = 900             # 백테스트 기간(대략 3~4년)
-market_filter_symbol = "069500" # 코스피200 ETF 등 시장 필터 프록시
+enabled = false
+lookback_days = 900
+market_filter_symbol = "069500" # 코스피200 ETF
 market_ma_days = 200
 liquidity_lookback = 20
-liquidity_min_avg_value = 500000000   # 20일 평균 거래대금(원) 컷 (예: 5억)
+liquidity_min_avg_value = 500000000   # 20일 평균 거래대금 컷 (5억)
 max_hold_days = 20
 atr_period = 14
-stop_atr_mult = 0.0             # 0=미사용 (예: 2.5 설정 가능)
-trail_atr_mult = 0.0            # 0=미사용
-cost_bps_per_side = 25          # 편도 수수료(bps) 25=0.25%
+stop_atr_mult = 0.0
+trail_atr_mult = 0.0
+cost_bps_per_side = 25
 summary_top_n = 50
 
-[liquidity]
-use_turnover_filter = true      # 회전율 필터 사용
-turnover_days = 20              # 최근 N일 평균 회전율
-kospi_min_turnover_daily  = 0.005   # 코스피 0.5%
-kosdaq_min_turnover_daily = 0.01    # 코스닥 1.0%
-
-[bbands]            # 볼린저밴드: 리포트 참고용
+# =========================
+# 보조 지표
+# =========================
+[bbands]
 enabled = true
 period  = 20
 stdev   = 2.0
