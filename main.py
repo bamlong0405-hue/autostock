@@ -1,47 +1,57 @@
-# main.py
 import os
 import sys
-import time
 import toml
 import pandas as pd
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# === 프로젝트 모듈 ===
 from data_sources import (
     fetch_krx, fetch_yahoo, date_range_for_lookback,
-    get_all_krx_tickers, get_krx_name, get_board_sets, attach_turnover_krx
+    get_all_krx_tickers, get_krx_name,
+    get_board_sets, attach_turnover_krx,   # NEW
 )
 from strategy import build_features, generate_signal
 from reporter import build_html_report
 from mailer import send_mail_html
-from backtest import simulate_symbol
-from bt_reporter import save_backtest_outputs
-from fundamentals import fetch_fundamental_map
-from news import fetch_news_headlines
-from dart_client import latest_filings
-from report_attach import build_buy_attachment
 
-# -----------------------
-# 공용 로그(즉시 flush)
-# -----------------------
-def log(msg: str):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+# (선택) 리뷰/펀더멘탈/뉴스/공시 확장 사용 중이면 임포트 유지
+try:
+    from fundamentals import fetch_fundamental_map
+except Exception:
+    fetch_fundamental_map = None
+try:
+    from news import fetch_news_headlines
+except Exception:
+    fetch_news_headlines = None
+try:
+    from dart_client import latest_filings
+except Exception:
+    latest_filings = None
 
-# -----------------------
-# 헬퍼
-# -----------------------
+# -----------------------------------------------------------------------------
 def get_name(symbol: str, market: str) -> str:
-    if market == "KRX":
-        try:
-            return get_krx_name(symbol)
-        except Exception:
-            return symbol
-    return symbol
+    return get_krx_name(symbol) if market == "KRX" else symbol
 
-def analyze_symbol(symbol: str, market: str, cfg: dict):
-    """개별 심볼 분석: (features, info, ohlc_df) 반환"""
-    lb = int(cfg['general']['lookback_days'])
+def _build_regime_series(cfg: dict) -> pd.Series | None:
+    try:
+        m_sym = cfg.get("mode", {}).get("regime_symbol", "069500")
+        lb = int(cfg["general"]["lookback_days"]) + int(cfg.get("mode", {}).get("regime_ma_days", 200)) + 10
+        ks, ke, _, _ = date_range_for_lookback(lb)
+        mdf = fetch_krx(m_sym, ks, ke)
+        if mdf is None or mdf.empty:
+            return None
+        n = int(cfg.get("mode", {}).get("regime_ma_days", 200))
+        ma = mdf["Close"].rolling(n).mean()
+        regime_bull = (mdf["Close"] > ma)
+        regime_bull.name = "REGIME_BULL"
+        return regime_bull
+    except Exception:
+        return None
+
+def analyze_symbol(symbol: str,
+                   market: str,
+                   cfg: dict,
+                   regime_bull: pd.Series | None = None) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
+    lb = cfg['general']['lookback_days']
     krx_start, krx_end, yah_start, yah_end = date_range_for_lookback(lb)
 
     if market == "KRX":
@@ -50,34 +60,62 @@ def analyze_symbol(symbol: str, market: str, cfg: dict):
         df = fetch_yahoo(symbol, yah_start, yah_end)
 
     if df is None or df.empty or len(df) < max(60, lb // 2):
-        return pd.DataFrame(), {}, df
+        return pd.DataFrame(), {}, (df if isinstance(df, pd.DataFrame) else pd.DataFrame())
 
     feat = build_features(df, cfg)
+
+    # 레짐 오버레이: 피처에 붙여 두면 디버깅도 쉬움
+    if isinstance(regime_bull, pd.Series) and not regime_bull.empty:
+        feat["REGIME_BULL"] = regime_bull.reindex(feat.index).ffill().fillna(False)
+
     feat['Signal'] = generate_signal(feat, cfg)
-    latest = feat.dropna().iloc[-1]
+    feat = feat.dropna(subset=["Close"])  # 안전
+
+    if feat.empty:
+        return pd.DataFrame(), {}, df
+
+    latest = feat.iloc[-1]
+    cur_signal = str(latest['Signal'])
+
+    # 약세장(레짐 OFF)일 때 BUY 차단 옵션
+    if cfg.get("mode", {}).get("regime_disable_buy_in_bear", True):
+        is_bull = bool(latest.get("REGIME_BULL", True))
+        if cur_signal == "BUY" and not is_bull:
+            cur_signal = "HOLD"
+
+    # 최근 BUY 이후 N일 쿨다운
+    cooldown = int(cfg.get("signals", {}).get("cooldown_days", 0) or 0)
+    if cooldown > 0 and cur_signal == "BUY":
+        buy_idx = feat.index[feat['Signal'].astype(str).str.upper() == "BUY"]
+        if len(buy_idx) >= 2:
+            # 직전 BUY와의 일수 차이
+            prev = buy_idx[-2]
+            days = (feat.index[-1] - prev).days if hasattr(prev, "to_pydatetime") or hasattr(prev, "tzinfo") else cooldown
+            if days < cooldown:
+                cur_signal = "HOLD"
 
     info = {
         "market": market,
         "symbol": symbol,
         "name": get_name(symbol, market),
-        "signal": str(latest['Signal']),
+        "signal": cur_signal,
         "close": round(float(latest['Close']), 3),
-        "rsi": round(float(latest.get('RSI', float('nan'))), 2) if 'RSI' in feat.columns else None,
-        "wr": round(float(latest.get('WR', float('nan'))), 2) if 'WR' in feat.columns else None,
+        "rsi": round(float(latest['RSI']), 2) if pd.notna(latest.get("RSI", pd.NA)) else None,
+        "wr":  round(float(latest['WR']), 2)  if pd.notna(latest.get("WR", pd.NA))  else None,
+        "ma20_gap_pct": (
+            round((latest['Close'] - latest['MA_M']) / latest['MA_M'] * 100, 2)
+            if pd.notna(latest.get("MA_M", pd.NA)) and latest['MA_M'] else None
+        ),
+        # 디버깅/랭킹용
+        "obv_slope": float(latest['OBV_slope']) if pd.notna(latest.get("OBV_slope", pd.NA)) else None,
+        "regime_bull": bool(latest.get("REGIME_BULL", True)),
     }
-    if 'MA_M' in feat.columns and pd.notna(latest.get('MA_M')):
-        try:
-            info["ma20_gap_pct"] = round((latest['Close'] - latest['MA_M']) / latest['MA_M'] * 100, 2)
-        except Exception:
-            info["ma20_gap_pct"] = None
-    else:
-        info["ma20_gap_pct"] = None
-
     return feat, info, df
 
 def load_universe(cfg: dict):
     uv = cfg.get('universe', {})
     krx_mode = str(uv.get('krx_mode', 'LIST')).upper()
+
     if krx_mode == "ALL":
         krx_codes = get_all_krx_tickers(
             exclude_etf_etn_spac=uv.get('exclude_etf_etn_spac', True),
@@ -86,224 +124,87 @@ def load_universe(cfg: dict):
         )
     else:
         krx_codes = uv.get('krx', [])
+
     yah = uv.get('yahoo', [])
     return krx_codes, yah
 
-def maybe_run_backtest(cfg: dict, feats_map: dict, df_map: dict):
-    """선택적 백테스트 실행 (config.backtest.enabled)"""
-    bt = cfg.get('backtest', {})
-    if not bt.get('enabled', False):
-        return None
-
-    lb = int(bt.get('lookback_days', 900))
-    m_symbol = bt.get('market_filter_symbol', '069500')
-    _, _, _, _ = date_range_for_lookback(lb)
-
-    # 시장 상태(>MA) 시리즈
-    m_df = df_map.get(m_symbol)
-    if m_df is None or m_df.empty:
-        try:
-            ks, ke, _, _ = date_range_for_lookback(lb)
-            m_df = fetch_krx(m_symbol, ks, ke)
-        except Exception:
-            m_df = pd.DataFrame()
-
-    market_ok = None
-    if m_df is not None and not m_df.empty:
-        ma_days = int(bt.get('market_ma_days', 200))
-        m_ma = m_df['Close'].rolling(ma_days).mean()
-        market_ok = (m_df['Close'] > m_ma)
-        market_ok.name = 'market_ok'
-
-    liq_lb = int(bt.get('liquidity_lookback', 20))
-    liq_min = float(bt.get('liquidity_min_avg_value', 0.0))
-    max_hold = int(bt.get('max_hold_days', 0))
-    atr_period = int(bt.get('atr_period', 14))
-    stop_mult = float(bt.get('stop_atr_mult', 0.0))
-    trail_mult = float(bt.get('trail_atr_mult', 0.0))
-    cost_bps = float(bt.get('cost_bps_per_side', 25.0))
-    top_n = int(bt.get('summary_top_n', 50))
-
-    results = []
-    for sym, feat in feats_map.items():
-        df = df_map.get(sym)
-        if df is None or df.empty:
-            continue
-        avg_value = (df['Close'] * df['Volume']).rolling(liq_lb).mean()
-        mk = None
-        if market_ok is not None:
-            mk = market_ok.reindex(df.index).fillna(method='ffill').fillna(False)
-
-        metrics, eq, trades = simulate_symbol(
-            signals=feat['Signal'],
-            ohlc=df,
-            market_ok=mk,
-            avg_value=avg_value,
-            liquidity_min_value=liq_min,
-            max_hold_days=max_hold,
-            atr_period=atr_period,
-            stop_atr_mult=stop_mult,
-            trail_atr_mult=trail_mult,
-            cost_bps_per_side=cost_bps
-        )
-        metrics.update({"market": "KRX", "symbol": sym, "name": get_krx_name(sym)})
-        results.append(metrics)
-
-    outdir = cfg['general']['output_dir']
-    csv_path, html_path = save_backtest_outputs(results, outdir, top_n=top_n)
-    return {"csv": csv_path, "html": html_path, "count": len(results)}
-
-# -----------------------
-# 메인
-# -----------------------
+# -----------------------------------------------------------------------------
 def main():
     cfg = toml.load("config.toml")
     os.makedirs(cfg['general']['output_dir'], exist_ok=True)
-    workers = int(cfg.get('general', {}).get('workers', 8))
 
-    # 1) 유니버스 로드
+    # 심볼 유니버스
     krx_codes, yah_codes = load_universe(cfg)
-    log(f"Universe: KRX={len(krx_codes)}, YAHOO={len(yah_codes)}")
 
-    # 2) (옵션) 보드/유동성 선필터
-    try:
-        if cfg.get('filters', {}).get('use_board_filter', True):
-            boards = get_board_sets()  # {"KOSPI": set([...]), "KOSDAQ": set([...]) ...}
-            allow = set()
-            if cfg.get('filters', {}).get('board_allow_kospi', True):
-                allow |= boards.get("KOSPI", set())
-            if cfg.get('filters', {}).get('board_allow_kosdaq', True):
-                allow |= boards.get("KOSDAQ", set())
-            before = len(krx_codes)
-            krx_codes = [s for s in krx_codes if s in allow] if allow else krx_codes
-            log(f"Board filter: {before} → {len(krx_codes)}")
-    except Exception as e:
-        log(f"[WARN] board filter skipped: {e}")
+    # 레짐 시리즈
+    regime_series = _build_regime_series(cfg)
 
-    try:
-        if cfg.get('filters', {}).get('use_liquidity_filter', False):
-            liq = attach_turnover_krx(krx_codes)  # 구현: turnover_20d_pct / value_20d_avg 컬럼 기대
-            min_turn = float(cfg['filters'].get('min_turnover_20d_pct', 0.3))  # %
-            min_value = float(cfg['filters'].get('min_value_20d_avg', 1e9))    # 10억
-            keep = set(liq.loc[
-                (liq['turnover_20d_pct'] >= min_turn) & (liq['value_20d_avg'] >= min_value),
-                'ticker'
-            ])
-            before = len(krx_codes)
-            krx_codes = [s for s in krx_codes if s in keep] if keep else krx_codes
-            log(f"Liquidity filter: {before} → {len(krx_codes)}")
-    except Exception as e:
-        log(f"[WARN] liquidity filter skipped: {e}")
+    results: list[dict] = []
+    details: dict[str, pd.DataFrame] = {}
+    feats_map: dict[str, pd.DataFrame] = {}
+    df_map: dict[str, pd.DataFrame] = {}
 
-    # (옵션) 개발 중 상한
-    max_syms = int(cfg.get('general', {}).get('max_symbols', 0) or 0)
-    if max_syms > 0 and len(krx_codes) > max_syms:
-        krx_codes = krx_codes[:max_syms]
-        log(f"Cap universe to {max_syms} symbols (dev/test)")
+    # --- KRX ---
+    for i, sym in enumerate(krx_codes, 1):
+        feat, info, df = analyze_symbol(sym, "KRX", cfg, regime_bull=regime_series)
+        if not feat.empty and info:
+            results.append(info)
+            keep_cols = [c for c in [
+                'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope',
+                'Bullish','Bearish','Bull_Engulf','REGIME_BULL','BB_POS_PCT'
+            ] if c in feat.columns]
+            details[sym]  = feat[keep_cols].copy()
+            feats_map[sym] = feat
+            df_map[sym]    = df
+        if i % 200 == 0:
+            print(f"[KRX] processed {i}/{len(krx_codes)}")
 
-    # 3) 분석 실행 (KRX 병렬)
-    results = []
-    details = {}
-    feats_map = {}
-    df_map = {}
+    # --- Yahoo (옵션) ---
+    for sym in yah_codes:
+        feat, info, df = analyze_symbol(sym, "YAHOO", cfg, regime_bull=regime_series)
+        if not feat.empty and info:
+            results.append(info)
+            keep_cols = [c for c in [
+                'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope',
+                'Bullish','Bearish','Bull_Engulf','REGIME_BULL','BB_POS_PCT'
+            ] if c in feat.columns]
+            details[sym]  = feat[keep_cols].copy()
+            feats_map[sym] = feat
+            df_map[sym]    = df
 
-    log(f"Start KRX scan (workers={workers}): {len(krx_codes)} symbols")
-    def _proc_krx(sym):
+    # --- 펀더멘털 (선택) ---
+    funda_map = {}
+    if fetch_fundamental_map is not None:
         try:
-            feat, info, df = analyze_symbol(sym, "KRX", cfg)
-            return sym, feat, info, df, None
+            krx_tickers = [r["symbol"] for r in results if r.get("market") == "KRX"]
+            funda_map = fetch_fundamental_map(krx_tickers) or {}
+            # info 확장
+            for r in results:
+                t = r.get("symbol")
+                if r.get("market") == "KRX" and t in funda_map:
+                    r.update({
+                        "per": funda_map[t].get("PER"),
+                        "pbr": funda_map[t].get("PBR"),
+                        "div": funda_map[t].get("DIV"),
+                    })
         except Exception as e:
-            return sym, None, None, None, e
+            print(f"[WARN] fundamentals failed: {e}")
 
-    done = 0
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(_proc_krx, sym) for sym in krx_codes]
-        for fut in as_completed(futs):
-            sym, feat, info, df, err = fut.result()
-            done += 1
-            if err:
-                if done % 50 == 0:
-                    log(f"[KRX] error {sym}: {err} (progress {done}/{len(krx_codes)})")
-                continue
-            if feat is not None and not feat.empty:
-                results.append(info)
-                save_cols = [c for c in [
-                    'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope',
-                    'Bullish','Bearish','Bull_Engulf','BB_POS_PCT'
-                ] if c in feat.columns]
-                details[sym] = feat[save_cols].copy()
-                feats_map[sym] = feat
-                df_map[sym] = df
-            if done % 200 == 0:
-                log(f"[KRX] processed {done}/{len(krx_codes)}")
-    log("KRX scan done.")
-
-    # 4) (선택) 야후 심볼
-    if yah_codes:
-        log(f"Start Yahoo scan: {len(yah_codes)} symbols")
-        for sym in yah_codes:
-            try:
-                feat, info, df = analyze_symbol(sym, "YAHOO", cfg)
-                if not feat.empty:
-                    results.append(info)
-                    save_cols = [c for c in [
-                        'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope',
-                        'Bullish','Bearish','Bull_Engulf','BB_POS_PCT'
-                    ] if c in feat.columns]
-                    details[sym] = feat[save_cols].copy()
-                    feats_map[sym] = feat
-                    df_map[sym] = df
-            except Exception as e:
-                log(f"[YAHOO] error {sym}: {e}")
-        log("Yahoo scan done.")
-
-    # 5) 펀더멘털/뉴스/공시 수집 (BUY 위주)
-    # 펀더멘털(PER/PBR/DIV)
-    try:
-        krx_tickers = [r["symbol"] for r in results if r.get("market") == "KRX"]
-        funda_map = fetch_fundamental_map(krx_tickers) if krx_tickers else {}
-    except Exception as e:
-        log(f"[WARN] fundamentals fetch skipped: {e}")
-        funda_map = {}
-
+    # --- 회전율(시총 대비 거래대금 %) 부착 ---
+    turn_info = attach_turnover_krx([r["symbol"] for r in results if r.get("market")=="KRX"])
     for r in results:
-        if r.get("market") == "KRX" and r.get("symbol") in funda_map:
-            f = funda_map[r["symbol"]]
-            r["per"] = f.get("PER")
-            r["pbr"] = f.get("PBR")
-            r["div"] = f.get("DIV")
+        if r.get("market") != "KRX":
+            continue
+        t = r["symbol"]
+        ti = turn_info.get(t, {})
+        r["turnover_pct"] = ti.get("turnover_pct")
+        r["board"] = ti.get("board")
 
-    # 최신 뉴스/공시 (메일 용량 고려: BUY만)
-    email_opts = cfg.get("email_options", {})
-    max_news = int(email_opts.get("max_news_per_symbol", 3))
-    max_filings = int(email_opts.get("max_filings_per_symbol", 3))
-    aux_info = {}  # {sym: {"news":[...], "filings":[...]}}
-
-    buy_rows_all = [r for r in results if str(r.get("signal")).upper() == "BUY"]
-    if buy_rows_all:
-        for r in buy_rows_all:
-            sym = r["symbol"]
-            name = r.get("name") or sym
-            try:
-                news_items = fetch_news_headlines(name, max_items=max_news, lang="ko")
-            except Exception as e:
-                news_items = []
-                log(f"[WARN] news fetch fail {name}: {e}")
-            try:
-                filings = latest_filings(name, max_items=max_filings)
-            except Exception as e:
-                filings = []
-                log(f"[WARN] dart fetch fail {name}: {e}")
-
-            if news_items or filings:
-                aux_info[sym] = {"news": news_items, "filings": filings}
-
-    # 6) 리포트 생성
+    # ---------- 리포트 생성 (전체) ----------
     if not results:
         html = "<html><body><h1>No data</h1></body></html>"
         all_html = html
     else:
-        # 전체 리포트(파일/아티팩트용)
         all_html = build_html_report(
             results, details, cfg,
             show_charts=True,
@@ -311,66 +212,118 @@ def main():
             max_table_rows=100000
         )
 
-        # 메일용: BUY/SELL만, 차트 제외(용량↓)
+        # ---------- 메일용 요약 ----------
+        email_opts = cfg.get("email_options", {})
         email_only = bool(email_opts.get("email_only_signals", True))
-        include_charts = bool(email_opts.get("include_charts", False))
-        max_email_rows = int(email_opts.get("max_email_rows", 300))
         max_email_charts = int(email_opts.get("max_email_charts", 0))
+        include_charts   = bool(email_opts.get("include_charts", False))
+        max_email_rows   = int(email_opts.get("max_email_rows", 300))
 
-        if email_only:
-            filtered = [r for r in results if str(r.get("signal")).upper() in ("BUY","SELL")]
-            if not filtered:
-                html = "<html><body><h1>No BUY/SELL signals today</h1></body></html>"
-            else:
-                symbols = [r["symbol"] for r in filtered]
-                if include_charts and max_email_charts > 0:
-                    symbols = symbols[:max_email_charts]
-                    filtered_details = {s: details[s] for s in symbols if s in details}
-                else:
-                    filtered_details = {}
-                html = build_html_report(
-                    filtered, filtered_details, cfg,
-                    show_charts=include_charts and max_email_charts > 0,
-                    max_charts=max_email_charts,
-                    max_table_rows=max_email_rows
-                )
+        # BUY/SELL 선별
+        base_list = [r for r in results if str(r.get("signal")).upper() in ("BUY","SELL")] if email_only else list(results)
+
+        # ① 회전율 필터( BUY 에만 적용 )
+        if cfg.get("filters", {}).get("use_turnover", True):
+            k_min = float(cfg["filters"].get("turnover_min_pct_kospi", 0.15))
+            q_min = float(cfg["filters"].get("turnover_min_pct_kosdaq", 0.25))
+            def pass_turnover(row: dict) -> bool:
+                if str(row.get("signal")).upper() != "BUY":
+                    return True
+                pct   = row.get("turnover_pct")
+                board = row.get("board")
+                if pct is None or board is None:
+                    return False
+                thr = k_min if board == "KOSPI" else q_min
+                return pct >= thr
+            base_list = [r for r in base_list if pass_turnover(r)]
+
+        # ② 혼잡도 제한( BUY 너무 많을 때 상한 )
+        oc = cfg.get("overcrowd", {})
+        if oc.get("enabled", True):
+            max_buys = int(oc.get("max_buys", 120))
+            rank_key = str(oc.get("rank_metric", "turnover_pct"))
+            buys  = [r for r in base_list if str(r.get("signal")).upper()=="BUY"]
+            sells = [r for r in base_list if str(r.get("signal")).upper()=="SELL"]
+            if len(buys) > max_buys:
+                # 랭킹 기준: turnover_pct / obv_slope / ma20_gap
+                def score(r: dict) -> float:
+                    v = r.get({
+                        "turnover_pct":"turnover_pct",
+                        "obv_slope":"obv_slope",
+                        "ma20_gap":"ma20_gap_pct"
+                    }.get(rank_key, "turnover_pct"))
+                    try:
+                        return float(v) if v is not None else -1e9
+                    except Exception:
+                        return -1e9
+                buys = sorted(buys, key=score, reverse=True)[:max_buys]
+            base_list = buys + sells
+
+        # ③ 차트 포함 여부
+        if not base_list:
+            html = "<html><body><h1>No BUY/SELL signals today</h1></body></html>"
+            filtered_details = {}
         else:
+            symbols = [r["symbol"] for r in base_list]
+            if include_charts and max_email_charts > 0:
+                symbols = symbols[:max_email_charts]
+                filtered_details = {s: details[s] for s in symbols if s in details}
+            else:
+                filtered_details = {}
+
             html = build_html_report(
-                results, {}, cfg,
-                show_charts=False,
+                base_list, filtered_details, cfg,
+                show_charts=include_charts and max_email_charts > 0,
+                max_charts=max_email_charts,
                 max_table_rows=max_email_rows
             )
 
-    # 7) 파일 저장(전체 리포트)
-    save_all = bool(cfg.get("email_options", {}).get("include_hold_in_report", True))
+    # ---------- 전체 리포트 저장 ----------
+    save_all = cfg.get("email_options", {}).get("include_hold_in_report", True)
     report_path = os.path.join(cfg['general']['output_dir'], cfg['general']['report_filename'])
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(all_html if save_all else html)
-    log(f"Report written: {report_path}")
 
-    # 8) 첨부 리포트(소형 차트+근거+뉴스/공시/리뷰)
+    # ---------- (선택) BUY 첨부 리포트 ----------
     attachment_paths = []
-    if bool(email_opts.get("attach_buy_report", True)) and buy_rows_all:
-        try:
-            attach_path = build_buy_attachment(
-                buy_rows=buy_rows_all,
-                details=details,
-                cfg=cfg,
-                out_path=f"{cfg['general']['output_dir'].rstrip('/')}/buy_report.html",
-                max_charts=int(email_opts.get("max_buy_charts", 10)),
-                aux_info=aux_info
-            )
-            attachment_paths.append(attach_path)
-            log(f"Attachment created: {attach_path}")
-        except Exception as e:
-            log(f"[WARN] build_buy_attachment failed: {e}")
+    try:
+        from report_attach import build_buy_attachment
+        email_opts = cfg.get("email_options", {})
+        if bool(email_opts.get("attach_buy_report", True)):
+            buy_rows = [r for r in results if str(r.get("signal")).upper() == "BUY"]
+            if cfg.get("filters", {}).get("use_turnover", True):
+                k_min = float(cfg["filters"].get("turnover_min_pct_kospi", 0.15))
+                q_min = float(cfg["filters"].get("turnover_min_pct_kosdaq", 0.25))
+                buy_rows = [
+                    r for r in buy_rows
+                    if r.get("turnover_pct") is not None and r.get("board") is not None and
+                       r["turnover_pct"] >= (k_min if r["board"]=="KOSPI" else q_min)
+                ]
+            if buy_rows:
+                attach_path = build_buy_attachment(
+                    buy_rows=buy_rows,
+                    details=details,
+                    cfg=cfg,
+                    out_path=f"{cfg['general']['output_dir'].rstrip('/')}/buy_report.html",
+                    max_charts=int(email_opts.get("max_buy_charts", 10)),
+                )
+                attachment_paths.append(attach_path)
+    except Exception as e:
+        print(f"[WARN] build_buy_attachment failed: {e}")
 
-    # 9) 메일 전송 (용량 폴백 포함)
-    smtp_user = cfg['email']['from_addr']
+    # ---------- 메일 전송 ----------
+    smtp_user   = cfg['email']['from_addr']
     app_password = os.environ.get("GMAIL_APP_PASSWORD", "")
     if not app_password:
-        log("ERROR: GMAIL_APP_PASSWORD env not set")
+        print("ERROR: GMAIL_APP_PASSWORD env not set", file=sys.stderr)
         sys.exit(1)
+
+    # 요약 로그
+    total = len(results)
+    buys  = sum(1 for r in results if str(r.get("signal")).upper()=="BUY")
+    sells = sum(1 for r in results if str(r.get("signal")).upper()=="SELL")
+    holds = total - buys - sells
+    print(f"[SUMMARY] total={total}, BUY={buys}, SELL={sells}, HOLD={holds}")
 
     try:
         send_mail_html(
@@ -382,10 +335,9 @@ def main():
             from_name=cfg['email']['from_name'],
             attachments=attachment_paths if attachment_paths else None
         )
-        log("Email sent.")
     except Exception as e:
-        log(f"[WARN] email send failed: {e}")
-        # 552 등 용량 초과 폴백: 표만 150행
+        print(f"[WARN] email send failed: {e}")
+        # 552 등 용량 에러 폴백
         fallback_html = build_html_report(
             [r for r in results if str(r.get("signal")).upper() in ("BUY","SELL")],
             {},
@@ -403,23 +355,13 @@ def main():
                 from_name=cfg['email']['from_name'],
                 attachments=None
             )
-            log("Sent fallback email (reduced size).")
+            print("Sent fallback email (reduced size).")
         except Exception as e2:
-            log(f"Email failed even after fallback: {e2}")
+            print(f"Email failed even after fallback: {e2}", file=sys.stderr)
             sys.exit(1)
 
-    # 10) 요약 & (옵션) 백테스트
-    total = len(results)
-    buys  = sum(1 for r in results if str(r.get("signal")).upper() == "BUY")
-    sells = sum(1 for r in results if str(r.get("signal")).upper() == "SELL")
-    holds = total - buys - sells
-    log(f"[SUMMARY] total={total}, BUY={buys}, SELL={sells}, HOLD={holds}")
+    print(f"Report written: {report_path} ({datetime.now()})")
 
-    bt_out = maybe_run_backtest(cfg, feats_map, df_map)
-    if bt_out:
-        log(f"Backtest: {bt_out['count']} symbols → {bt_out['csv']}, {bt_out['html']}")
-
-    log(f"Done at {datetime.now()}")
-
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     main()
