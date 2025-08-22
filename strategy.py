@@ -1,10 +1,15 @@
 import pandas as pd
 import numpy as np
+from typing import Optional
+
+# ===== 기존 지표 유틸(네임은 프로젝트와 동일하게 유지) =====
 from indicators import (
     williams_r, rsi, obv, moving_average, candle_bearish, candle_bullish, slope
 )
 
-# -------- 공통 유틸 --------
+# ------------------------------------------------------------
+# 내부 유틸
+# ------------------------------------------------------------
 def _ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False, min_periods=span).mean()
 
@@ -17,7 +22,6 @@ def macd_lines(close: pd.Series, fast=12, slow=26, signal=9):
 def bullish_engulfing(df: pd.DataFrame) -> pd.Series:
     o, c = df['Open'], df['Close']
     prev_o, prev_c = o.shift(1), c.shift(1)
-    # 전일 음봉 & 당일 양봉 & 당일 몸통이 전일 몸통을 감쌈
     return (prev_c < prev_o) & (c > o) & (c >= prev_o) & (o <= prev_c)
 
 def bearish_engulfing(df: pd.DataFrame) -> pd.Series:
@@ -27,9 +31,9 @@ def bearish_engulfing(df: pd.DataFrame) -> pd.Series:
 
 def bullish_divergence_proxy(df: pd.DataFrame, rsi_s: pd.Series, lookback=40, half=20) -> pd.Series:
     """
-    프록시 방식의 상승 다이버전스:
-    - 최근 half창 저가 < 이전 half창 저가  (가격 저점 낮아짐)
-    - 최근 half창 RSI 최저 > 이전 half창 RSI 최저 (RSI 저점 높아짐)
+    간단 프록시:
+      - 최근 half창 저가 < 이전 half창 저가 (가격 저점 하락)
+      - 최근 half창 RSI 최저 > 이전 half창 RSI 최저 (RSI 저점 상승)
     """
     low = df['Low']
     prev_low = low.shift(half).rolling(half, min_periods=max(2, half//2)).min()
@@ -50,11 +54,13 @@ def bearish_divergence_proxy(df: pd.DataFrame, rsi_s: pd.Series, lookback=40, ha
 
     return (curr_high > prev_high) & (curr_rsi_max < prev_rsi_max)
 
-# -------- 피처 생성 --------
+# ------------------------------------------------------------
+# 피처 생성
+# ------------------------------------------------------------
 def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     out = df.copy()
 
-    # 기본 지표
+    # === 기본 지표
     out['WR']  = williams_r(out, cfg['signals']['williams_r_period'])
     out['RSI'] = rsi(out['Close'], cfg['signals']['rsi_period'])
     out['OBV'] = obv(out)
@@ -64,22 +70,22 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     out['MA_M'] = moving_average(out['Close'], cfg['signals']['ma_mid'])
     out['MA_L'] = moving_average(out['Close'], cfg['signals']['ma_long'])
 
-    # 캔들(옵션)
+    # === 캔들(옵션)
     out['Bearish'] = candle_bearish(out) if cfg['signals'].get('use_bearish_candle', True) else False
     out['Bullish'] = candle_bullish(out) if cfg['signals'].get('use_bullish_candle', True) else False
 
-    # 안전장치: inf/NaN 정리
+    # === 안전장치: inf/NaN 정리 + FutureWarning 회피
     out = out.replace([float('inf'), float('-inf')], pd.NA)
     for col in ['WR','RSI','OBV','OBV_slope','MA_S','MA_M','MA_L','Open','High','Low','Close','Volume']:
         if col in out.columns:
-            out[col] = out[col].ffill()
+            out[col] = out[col].ffill().infer_objects(copy=False)
 
     # OHLCV 보존
     for col in ['Open','High','Low','Close','Volume']:
         if col not in out.columns and col in df.columns:
             out[col] = df[col]
 
-    # --- 블로그 모드용 보조지표 (MACD/거래량 평균) ---
+    # === 블로그 모드 보조 (MACD/장악형/거래량 평균)
     bcfg = cfg.get('blog_signals', {})
     m_fast = int(bcfg.get('macd_fast', 12))
     m_slow = int(bcfg.get('macd_slow', 26))
@@ -92,32 +98,32 @@ def build_features(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
     out['VOL_MA20'] = out['Volume'].rolling(20, min_periods=10).mean()
 
-    # 블로그 모드용 캔들(장악형)
     out['Bull_Engulf'] = bullish_engulfing(out)
     out['Bear_Engulf'] = bearish_engulfing(out)
 
-    # --- Bollinger Bands (report 참고용) ---
+    # === Bollinger Bands (리포트 참고용)
     bb_cfg = cfg.get('bbands', {})
     if bb_cfg.get('enabled', True):
         n = int(bb_cfg.get('period', 20))
         k = float(bb_cfg.get('stdev', 2.0))
-        roll = out['Close'].rolling(window=n, min_periods=n)
+        roll = out['Close'].rolling(window=n, min_periods=n//2)
         ma = roll.mean()
         std = roll.std()
 
         out['BB_MID']   = ma
         out['BB_UPPER'] = ma + k * std
         out['BB_LOWER'] = ma - k * std
-        # 분모 0 방지
-        with np.errstate(invalid='ignore', divide='ignore'):
-            out['BB_WIDTH'] = (out['BB_UPPER'] - out['BB_LOWER']) / ma
-            band = (out['BB_UPPER'] - out['BB_LOWER'])
-            pos = (out['Close'] - out['BB_LOWER']) / band * 100.0
+        out['BB_WIDTH'] = (out['BB_UPPER'] - out['BB_LOWER']) / ma
+
+        band = (out['BB_UPPER'] - out['BB_LOWER'])
+        pos = (out['Close'] - out['BB_LOWER']) / band * 100.0
         out['BB_POS_PCT'] = pos.clip(lower=0, upper=100)
 
     return out
 
-# -------- 기본(기존) 전략 신호: 점수식 --------
+# ------------------------------------------------------------
+# 기본(점수식) 신호
+# ------------------------------------------------------------
 def _generate_signal_default(feat: pd.DataFrame, cfg: dict) -> pd.Series:
     sigcfg = cfg['signals']
 
@@ -154,9 +160,17 @@ def _generate_signal_default(feat: pd.DataFrame, cfg: dict) -> pd.Series:
     s = pd.Series("HOLD", index=feat.index, dtype="object")
     s = s.mask(buy_score  >= buy_th,  "BUY")
     s = s.mask(sell_score >= sell_th, "SELL")
+
+    # 재진입 쿨다운 (선택)
+    cooldown = int(sigcfg.get("cooldown_days", 0))
+    if cooldown > 0:
+        s = _apply_cooldown(s, cooldown)
+
     return s.astype(str).str.upper()
 
-# -------- 블로그 전략 신호: 다이버전스 + MACD + 장악형 + 거래량 --------
+# ------------------------------------------------------------
+# 블로그 모드 신호 (다이버전스 + MACD + 장악형 + 거래량)
+# ------------------------------------------------------------
 def _generate_signal_blog(feat: pd.DataFrame, cfg: dict) -> pd.Series:
     bcfg = cfg.get('blog_signals', {})
     rsi_period = int(bcfg.get('rsi_period', 14))
@@ -167,7 +181,6 @@ def _generate_signal_blog(feat: pd.DataFrame, cfg: dict) -> pd.Series:
     need_vol    = bool(bcfg.get('require_volume_surge', True))
     vol_mult    = float(bcfg.get('volume_surge_multiplier', 1.5))
 
-    # 지표 준비
     rsi_s = rsi(feat['Close'], rsi_period)
 
     macd = feat['MACD']; macd_sig = feat['MACD_SIG']
@@ -178,12 +191,11 @@ def _generate_signal_blog(feat: pd.DataFrame, cfg: dict) -> pd.Series:
     bear_div = bearish_divergence_proxy(feat, rsi_s, lookback, half)
 
     bull_eng = feat['Bull_Engulf']
-    bear_eng = feat['Bear_Engulf']
+    # bear_eng = feat['Bear_Engulf']  # 필요 시 사용
 
     vol_avg = feat['VOL_MA20']
     vol_surge = feat['Volume'] > (vol_avg * vol_mult)
 
-    # 조건 결합
     buy = bull_div & macd_golden
     if need_engulf:
         buy &= bull_eng
@@ -191,18 +203,40 @@ def _generate_signal_blog(feat: pd.DataFrame, cfg: dict) -> pd.Series:
         buy &= vol_surge
 
     sell = bear_div & macd_dead
-    # 필요하면 매도에 장악형/볼륨도 추가:
-    # if bcfg.get('require_bearish_engulfing', False): sell &= bear_eng
-    # if bcfg.get('require_volume_surge_for_sell', False): sell &= (feat['Volume'] > vol_avg * vol_mult)
+    # 필요 시 매도 강화 옵션 추가 가능
 
     s = pd.Series("HOLD", index=feat.index, dtype="object")
     s = s.mask(buy, "BUY")
     s = s.mask(sell, "SELL")
+
+    cooldown = int(cfg.get("signals", {}).get("cooldown_days", 0))
+    if cooldown > 0:
+        s = _apply_cooldown(s, cooldown)
+
     return s.astype(str).str.upper()
 
-# -------- 외부 노출 함수 --------
+# ------------------------------------------------------------
+# 재진입 쿨다운 헬퍼
+# ------------------------------------------------------------
+def _apply_cooldown(signal_series: pd.Series, cooldown_days: int) -> pd.Series:
+    """
+    최근 BUY 이후 cooldown_days 동안 신규 BUY를 HOLD로 완화.
+    """
+    s = signal_series.copy()
+    last_buy_idx = None
+    for i, v in enumerate(s):
+        if v == "BUY":
+            if last_buy_idx is not None and (i - last_buy_idx) < cooldown_days:
+                s.iloc[i] = "HOLD"
+            else:
+                last_buy_idx = i
+    return s
+
+# ------------------------------------------------------------
+# 외부 노출
+# ------------------------------------------------------------
 def generate_signal(feat: pd.DataFrame, cfg: dict) -> pd.Series:
-    mode = cfg.get('mode', {}).get('signal_mode', 'default').lower()
+    mode = str(cfg.get('mode', {}).get('signal_mode', 'default')).lower()
     if mode == "blog":
         return _generate_signal_blog(feat, cfg)
     return _generate_signal_default(feat, cfg)
