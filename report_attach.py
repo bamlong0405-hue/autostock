@@ -1,3 +1,4 @@
+# report_attach.py
 import io
 import os
 import base64
@@ -5,16 +6,13 @@ from datetime import datetime
 from typing import List, Dict, Optional, Any
 
 import pandas as pd
-import matplotlib
-matplotlib.use("Agg")  # 헤드리스 환경 안전
 import matplotlib.pyplot as plt
 
-# 리뷰 모듈은 선택 사항이므로 안전하게 로드
+# (선택) 리뷰 생성기: 없으면 건너뜀
 try:
-    from reviews import make_quick_review  # 선택적
+    from reviews import make_quick_review  # (row, tail_df, cfg) -> [str,...]
 except Exception:
-    def make_quick_review(row_dict: dict, tail_df: Optional[pd.DataFrame], cfg: dict) -> List[str]:
-        return []  # 미존재 시 빈 리뷰
+    make_quick_review = None
 
 HTML_HEADER = """<!doctype html><html><head><meta charset="utf-8">
 <title>BUY Report</title>
@@ -28,7 +26,7 @@ h2 { font-size: 18px; margin: 24px 0 8px; }
 .kv b { display: inline-block; width: 120px; }
 img { display:block; max-width: 100%; height: auto; border: 1px solid #eee; border-radius: 8px; }
 ul { margin: 6px 0 0 18px; }
-a { color: #0a58ca; text-decoration: none; }
+a { color: #2563eb; text-decoration: none; }
 a:hover { text-decoration: underline; }
 </style>
 </head><body>
@@ -46,32 +44,22 @@ def _fig_to_base64(fig) -> str:
     return f"data:image/png;base64,{b64}"
 
 def _small_price_chart(df: pd.DataFrame, name: str) -> str:
-    """
-    최근 60봉 기준 Close/MA20 그리고 BB(있으면)까지 얹어서 미니 차트 생성
-    """
     d = df.tail(60).copy()
-    fig, ax = plt.subplots(figsize=(6.0, 3.0))
+    fig, ax = plt.subplots(figsize=(6.4, 3.0))
 
-    # Close & MA20
-    ax.plot(d.index, d["Close"], label="Close", linewidth=1.4)
+    # 종가/MA20
+    ax.plot(d.index, d["Close"], label="Close")
     if "MA_M" in d.columns:
-        ax.plot(d.index, d["MA_M"], label="MA20", linewidth=1.2)
+        ax.plot(d.index, d["MA_M"], label="MA20")
 
-    # Bollinger Bands (있을 때만)
-    has_bb = all(c in d.columns for c in ["BB_UPPER", "BB_MID", "BB_LOWER"])
-    if has_bb:
-        ax.plot(d.index, d["BB_UPPER"], linewidth=0.9, label="BB Upper")
-        ax.plot(d.index, d["BB_MID"],   linewidth=0.9, label="BB Mid")
-        ax.plot(d.index, d["BB_LOWER"], linewidth=0.9, label="BB Lower")
-        # 밴드 채우기
-        try:
-            ax.fill_between(d.index, d["BB_LOWER"], d["BB_UPPER"], alpha=0.08)
-        except Exception:
-            pass
+    # BB 대역을 얇은 라인
+    if "BB_UPPER" in d.columns and "BB_LOWER" in d.columns:
+        ax.plot(d.index, d["BB_UPPER"], label="BB Upper", linewidth=0.8)
+        ax.plot(d.index, d["BB_LOWER"], label="BB Lower", linewidth=0.8)
 
     ax.set_title(name)
     ax.grid(True, linestyle=":", linewidth=0.6)
-    ax.legend(fontsize=8, ncol=4, loc="upper left")
+    ax.legend(loc="best", fontsize=8)
     return _fig_to_base64(fig)
 
 def build_buy_attachment(
@@ -80,14 +68,8 @@ def build_buy_attachment(
     cfg: dict,
     out_path: str = "output/buy_report.html",
     max_charts: int = 10,
-    aux_info: Optional[Dict[str, Any]] = None,  # ← 뉴스/공시 전달 (선택)
+    aux_info: Optional[Dict[str, Any]] = None,  # {'000660': {'news':[...], 'filings':[...]} }
 ) -> str:
-    """
-    buy_rows: signal == BUY 인 종목 dict 리스트
-              예) {"market": "KRX", "symbol": "000000", "name": "...", "rsi":..., "wr":..., "ma20_gap_pct":...}
-    details : 심볼 -> 피처 DataFrame (Close/MA_M/RSI/WR/OBV_slope/BB_* 포함 권장)
-    aux_info: 심볼 -> {"news":[{title,link,published}], "filings":[{rpt,link,rcpdt}]}
-    """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     html: List[str] = [HTML_HEADER, f"<h1>BUY Report</h1><div class='meta'>Generated at {ts}</div>"]
 
@@ -97,24 +79,32 @@ def build_buy_attachment(
         name = r.get("name", sym)
         df = details.get(sym)
 
-        # --- 차트
-        chart_uri = ""
+        # 카드 시작
+        html.append("<div class='card'>")
+        html.append(f"<h2>{name} <span style='color:#888;font-weight:normal;'>({r['market']}:{sym})</span></h2>")
+
+        # 키/값
+        rsi = r.get("rsi")
+        wr  = r.get("wr")
+        gap = r.get("ma20_gap_pct")
+        html.append("<div class='kv'>")
+        if rsi is not None: html.append(f"<div><b>RSI</b> {float(rsi):.2f}</div>")
+        if wr  is not None: html.append(f"<div><b>Williams %R</b> {float(wr):.2f}</div>")
+        if gap is not None: html.append(f"<div><b>MA20 Gap</b> {float(gap):.2f}%</div>")
+        html.append("</div>")
+
+        # 차트
         if isinstance(df, pd.DataFrame) and not df.empty:
-            chart_uri = _small_price_chart(df, f"{name} ({sym})")
+            html.append(f"<img src='{_small_price_chart(df, f'{name} ({sym})')}' alt='chart'/>")
 
-        # --- 주요 수치
-        rsi = r.get("rsi", None)
-        wr  = r.get("wr", None)
-        gap = r.get("ma20_gap_pct", None)
-
-        # --- 추천 근거(기술)
+        # 추천 근거
         reasons: List[str] = []
         if rsi is not None:
             reasons.append(f"RSI {float(rsi):.2f} — 과매도/반등 가능성 체크")
         if wr is not None:
             reasons.append(f"Williams %R {float(wr):.2f} — 저점권(-80↓) 근접 시 반등 모멘텀")
         if gap is not None:
-            reasons.append(f"20일선 괴리 {float(gap):.2f}% — 과열/과매도 판단 참고")
+            reasons.append(f"20일선 괴리 {float(gap):.2f}% — 과열/과매도 판단 근거")
 
         if isinstance(df, pd.DataFrame) and not df.empty:
             last = df.iloc[-1]
@@ -125,19 +115,7 @@ def build_buy_attachment(
             if "Bullish" in df.columns and bool(last.get("Bullish", False)):
                 reasons.append("양봉/강세 캔들 신호")
             if "BB_POS_PCT" in df.columns and pd.notna(last.get("BB_POS_PCT", None)):
-                reasons.append(f"볼린저밴드 위치 {float(last['BB_POS_PCT']):.1f}% — 0%=하단, 100%=상단")
-
-        # --- 카드
-        html.append("<div class='card'>")
-        html.append(f"<h2>{name} <span style='color:#888;font-weight:normal;'>({r['market']}:{sym})</span></h2>")
-        html.append("<div class='kv'>")
-        if rsi is not None: html.append(f"<div><b>RSI</b> {float(rsi):.2f}</div>")
-        if wr  is not None: html.append(f"<div><b>Williams %R</b> {float(wr):.2f}</div>")
-        if gap is not None: html.append(f"<div><b>MA20 Gap</b> {float(gap):.2f}%</div>")
-        html.append("</div>")
-
-        if chart_uri:
-            html.append(f"<img src='{chart_uri}' alt='chart'/>")
+                reasons.append(f"볼린저밴드 위치 {float(last['BB_POS_PCT']):.1f}% — 0% 하단, 100% 상단")
 
         if reasons:
             html.append("<ul>")
@@ -145,23 +123,22 @@ def build_buy_attachment(
                 html.append(f"<li>{t}</li>")
             html.append("</ul>")
 
-        # --- 리뷰(요약) 섹션 (선택)
-        try:
-            tail_df = df.tail(60).copy() if isinstance(df, pd.DataFrame) and not df.empty else None
-            review_lines = make_quick_review(r, tail_df, cfg)
-            if review_lines:
-                html.append(
-                    "<div style='margin-top:8px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa'>"
-                    "<div style='font-weight:600;margin-bottom:6px'>리뷰(요약)</div>"
-                    "<ul style='margin:0 0 0 18px;padding:0'>"
-                )
-                for ln in review_lines:
-                    html.append(f"<li style='margin:2px 0'>{ln}</li>")
-                html.append("</ul></div>")
-        except Exception as e:
-            html.append(f"<div style='color:#888'>[리뷰 생성 오류: {e}]</div>")
+        # (선택) 리뷰 섹션
+        if make_quick_review and isinstance(df, pd.DataFrame) and not df.empty:
+            try:
+                tail_df = df.tail(60).copy()
+                lines = make_quick_review(r, tail_df, cfg)
+                if lines:
+                    html.append("<div style='margin-top:8px;padding:10px;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa'>")
+                    html.append("<div style='font-weight:600;margin-bottom:6px'>리뷰(요약)</div>")
+                    html.append("<ul style='margin:0 0 0 18px;padding:0'>")
+                    for ln in lines:
+                        html.append(f"<li style='margin:2px 0'>{ln}</li>")
+                    html.append("</ul></div>")
+            except Exception as e:
+                html.append(f"<div style='color:#888'>[리뷰 생성 오류: {e}]</div>")
 
-        # --- 뉴스 섹션 (선택)
+        # 뉴스 섹션
         if aux_info and sym in aux_info and aux_info[sym].get("news"):
             html.append("<div style='margin-top:8px;padding:10px;border:1px solid #e5e7eb;border-radius:10px'>")
             html.append("<div style='font-weight:600;margin-bottom:6px'>최근 뉴스</div><ul style='margin:0 0 0 18px;padding:0'>")
@@ -169,13 +146,11 @@ def build_buy_attachment(
                 title = it.get("title", "")
                 link = it.get("link", "#")
                 pub  = it.get("published", "")
-                html.append(
-                    f"<li style='margin:2px 0'><a href='{link}' target='_blank'>{title}</a> "
-                    f"<span style='color:#888'>({pub})</span></li>"
-                )
+                html.append(f"<li style='margin:2px 0'><a href='{link}' target='_blank'>{title}</a> "
+                            f"<span style='color:#888'>({pub})</span></li>")
             html.append("</ul></div>")
 
-        # --- 공시 섹션 (선택) — DART_API_KEY 필요
+        # 공시 섹션 (DART)
         if aux_info and sym in aux_info and aux_info[sym].get("filings"):
             html.append("<div style='margin-top:8px;padding:10px;border:1px solid #e5e7eb;border-radius:10px'>")
             html.append("<div style='font-weight:600;margin-bottom:6px'>최근 공시(DART)</div><ul style='margin:0 0 0 18px;padding:0'>")
@@ -183,10 +158,8 @@ def build_buy_attachment(
                 rpt   = it.get("rpt", "")
                 link  = it.get("link", "#")
                 rcpdt = it.get("rcpdt", "")
-                html.append(
-                    f"<li style='margin:2px 0'><a href='{link}' target='_blank'>{rpt}</a> "
-                    f"<span style='color:#888'>({rcpdt})</span></li>"
-                )
+                html.append(f"<li style='margin:2px 0'><a href='{link}' target='_blank'>{rpt}</a> "
+                            f"<span style='color:#888'>({rcpdt})</span></li>")
             html.append("</ul></div>")
 
         html.append("</div>")  # /card
