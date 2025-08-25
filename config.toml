@@ -22,7 +22,7 @@ max_email_charts         = 0
 max_email_rows           = 300
 include_hold_in_report   = true     # 저장되는 daily_report.html에는 HOLD 포함
 attach_buy_report        = true
-max_buy_charts           = 10
+max_buy_charts           = 30
 # 첨부 리포트용 옵션(뉴스/공시)
 max_news_per_symbol      = 3
 max_filings_per_symbol   = 3
