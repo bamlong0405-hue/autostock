@@ -472,8 +472,6 @@ def main():
         f.write(all_html if save_all else html)
 
     # ---------- 메일 전송 준비 (첨부 리포트 생성) ----------
-    from report_attach import build_buy_attachment
-
     smtp_user = cfg['email']['from_addr']
     app_password = os.environ.get("GMAIL_APP_PASSWORD", "")
     if not app_password:
@@ -482,35 +480,111 @@ def main():
 
     email_opts = cfg.get("email_options", {})
     attach_buy_report = bool(email_opts.get("attach_buy_report", True))
-    max_buy_charts    = int(email_opts.get("max_buy_charts", 10))
-    attachment_paths  = []
+    max_buy_charts    = int(email_opts.get("max_buy_charts", 10))   # 30으로 올려도 됨
+    embed_charts      = bool(email_opts.get("attach_embed_charts", False))  # 기본 False(용량 절감)
 
-    # 첨부: BUY만(랭킹된 리스트 사용) + 차트/근거/뉴스/공시
-    if attach_buy_report:
+    # (1) BUY만 추려서 보조 데이터 준비
+    buy_rows = [r for r in results if str(r.get("signal")).upper() == "BUY"]
+
+    # 뉴스/공시 수집 (이미 위에서 만든 aux_info가 있으면 재사용)
+    try:
+        aux_info
+    except NameError:
+        aux_info = {}
         try:
-            buy_rows = [r for r in results if str(r.get("signal")).upper() == "BUY"]
-            # 랭킹 버전으로 축소
-            buy_rows = email_buy_rows if 'email_buy_rows' in locals() and email_buy_rows else buy_rows
+            email_opts = cfg.get("email_options", {})
+            max_news = int(email_opts.get("max_news_per_symbol", 3))
+            max_filings = int(email_opts.get("max_filings_per_symbol", 3))
+        except Exception:
+            max_news, max_filings = 3, 3
 
-            if buy_rows:
-                attach_path = build_buy_attachment(
-                    buy_rows=buy_rows,
-                    details=details,
-                    cfg=cfg,
-                    out_path=f"{cfg['general']['output_dir'].rstrip('/')}/buy_report.html",
-                    max_charts=max_buy_charts,
-                    aux_info=locals().get("aux_info", {})  # 뉴스/공시 전달
-                )
-                attachment_paths.append(attach_path)
+        from news import fetch_news_headlines
+        from dart_client import latest_filings
+        for r in buy_rows:
+            sym = r["symbol"]
+            name = r.get("name") or sym
+            try:
+                news_items = fetch_news_headlines(name, max_items=max_news, lang="ko")
+            except Exception:
+                news_items = []
+            try:
+                filings = latest_filings(name, max_items=max_filings)
+            except Exception:
+                filings = []
+            if news_items or filings:
+                aux_info[sym] = {"news": news_items, "filings": filings}
+
+    # (2) 회전율(당일) 맵: {sym: {"turnover_pct":..., "board":...}}
+    turnover_map = {}
+    try:
+        from data_sources import attach_turnover_krx
+        buy_syms = [r["symbol"] for r in buy_rows if r.get("market") == "KRX"]
+        if buy_syms:
+            turnover_map = attach_turnover_krx(buy_syms) or {}
+    except Exception as e:
+        print(f"[WARN] turnover_map fail: {e}")
+        turnover_map = {}
+
+    # (3) 첨부 리포트 생성
+    attachment_paths  = []
+    if attach_buy_report and buy_rows:
+        try:
+            attach_path = build_buy_attachment(
+                buy_rows=buy_rows,
+                details=details,                 # 차트/전일 거래량 산출용 원시 피처 DF
+                cfg=cfg,
+                out_path=f"{cfg['general']['output_dir'].rstrip('/')}/buy_report.html",
+                max_charts=max_buy_charts,       # 30으로 늘리면 embed_charts=False 권장
+                aux_info=aux_info,               # 뉴스/공시
+                embed_charts=embed_charts,       # False면 용량 매우 작음(권장)
+                turnover_map=turnover_map,       # 회전율 표시
+            )
+            attachment_paths.append(attach_path)
         except Exception as e:
             print(f"[WARN] build_buy_attachment failed: {e}")
 
     # 요약 로그
     total = len(results)
-    buys  = sum(1 for r in results if str(r.get("signal")).upper() == "BUY")
-    sells = sum(1 for r in results if str(r.get("signal")).upper() == "SELL")
+    buys  = sum(1 for r in results if str(r.get("signal")).upper()=="BUY")
+    sells = sum(1 for r in results if str(r.get("signal")).upper()=="SELL")
     holds = total - buys - sells
     print(f"[SUMMARY] total={total}, BUY={buys}, SELL={sells}, HOLD={holds}")
+
+    # ---------- 메일 전송 ----------
+    try:
+        send_mail_html(
+            smtp_user=smtp_user,
+            app_password=app_password,
+            to_addrs=cfg['email']['to_addrs'],
+            subject=cfg['email']['subject'],
+            html=html,
+            from_name=cfg['email']['from_name'],
+            attachments=attachment_paths if attachment_paths else None
+        )
+    except Exception as e:
+        # 552 등 용량 에러 폴백: 표만, 150행 제한, 첨부 없음
+        print(f"[WARN] email send failed: {e}")
+        fallback_html = build_html_report(
+            [r for r in results if str(r.get("signal")).upper() in ("BUY","SELL")],
+            {},
+            cfg,
+            show_charts=False,
+            max_table_rows=150
+        )
+        try:
+            send_mail_html(
+                smtp_user=smtp_user,
+                app_password=app_password,
+                to_addrs=cfg['email']['to_addrs'],
+                subject=cfg['email']['subject'] + " (fallback)",
+                html=fallback_html,
+                from_name=cfg['email']['from_name'],
+                attachments=None
+            )
+            print("Sent fallback email (reduced size).")
+        except Exception as e2:
+            print(f"Email failed even after fallback: {e2}", file=sys.stderr)
+            sys.exit(1)
 
     # ---------- 메일 전송 ----------
     try:
