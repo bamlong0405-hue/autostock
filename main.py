@@ -9,8 +9,10 @@ from datetime import datetime
 from data_sources import (
     fetch_krx, fetch_yahoo, date_range_for_lookback,
     get_all_krx_tickers, get_krx_name,
-    get_board_sets, attach_turnover_krx
+    get_board_sets
 )
+import data_sources as _ds
+
 from strategy import build_features, generate_signal
 from reporter import build_html_report
 from mailer import send_mail_html
@@ -251,7 +253,7 @@ def main():
         filt = cfg.get("filters", {})
         use_turnover = bool(filt.get("use_turnover", False))
         # 오늘(또는 최근 영업일) 스냅샷 거래대금/시총으로 회전율 계산
-        turnover_info = attach_turnover_krx([r["symbol"] for r in results if r["market"] == "KRX"])
+        turnover_info = _ds.attach_turnover_krx([r["symbol"] for r in results if r["market"] == "KRX"])
         # board(KOSPI/KOSDAQ) 기준 임계치
         kospi_min = float(filt.get("turnover_min_pct_kospi", 0.15))
         kosdaq_min = float(filt.get("turnover_min_pct_kosdaq", 0.25))
@@ -429,7 +431,7 @@ def main():
         obv_map2 = {r["symbol"]: (float(details[r["symbol"]]["OBV_slope"].iloc[-1])
                                   if r["symbol"] in details and "OBV_slope" in details[r["symbol"]].columns and not details[r["symbol"]].empty else 0.0)
                     for r in buy_rows_all}
-        tov_map2 = {r["symbol"]: (attach_turnover_krx([r["symbol"]]).get(r["symbol"], {}).get("turnover_pct") or 0.0)
+        tov_map2 = {r["symbol"]: (_ds.attach_turnover_krx([r["symbol"]]).get(r["symbol"], {}).get("turnover_pct") or 0.0)
                     for r in buy_rows_all} if buy_rows_all else {}
         # 상위 25%(10~40) 기본
         email_buy_rows = rank_buy_candidates(
@@ -498,29 +500,33 @@ def main():
         except Exception:
             max_news, max_filings = 3, 3
 
-        from news import fetch_news_headlines
-        from dart_client import latest_filings
-        for r in buy_rows:
-            sym = r["symbol"]
-            name = r.get("name") or sym
-            try:
-                news_items = fetch_news_headlines(name, max_items=max_news, lang="ko")
-            except Exception:
-                news_items = []
-            try:
-                filings = latest_filings(name, max_items=max_filings)
-            except Exception:
-                filings = []
-            if news_items or filings:
-                aux_info[sym] = {"news": news_items, "filings": filings}
+        if buy_rows:
+            for r in buy_rows:
+                sym = r["symbol"]
+                name = r.get("name") or sym
+                try:
+                    if fetch_news_headlines:
+                        news_items = fetch_news_headlines(name, max_items=max_news, lang="ko")
+                    else:
+                        news_items = []
+                except Exception:
+                    news_items = []
+                try:
+                    if latest_filings and (os.environ.get("DART_API_KEY") or os.environ.get("OPEN_DART_API_KEY")):
+                        filings = latest_filings(name, max_items=max_filings)
+                    else:
+                        filings = []
+                except Exception:
+                    filings = []
+                if news_items or filings:
+                    aux_info[sym] = {"news": news_items, "filings": filings}
 
     # (2) 회전율(당일) 맵: {sym: {"turnover_pct":..., "board":...}}
     turnover_map = {}
     try:
-        from data_sources import attach_turnover_krx
         buy_syms = [r["symbol"] for r in buy_rows if r.get("market") == "KRX"]
         if buy_syms:
-            turnover_map = attach_turnover_krx(buy_syms) or {}
+            turnover_map = _ds.attach_turnover_krx(buy_syms) or {}
     except Exception as e:
         print(f"[WARN] turnover_map fail: {e}")
         turnover_map = {}
@@ -529,6 +535,7 @@ def main():
     attachment_paths  = []
     if attach_buy_report and buy_rows:
         try:
+            from report_attach import build_buy_attachment
             attach_path = build_buy_attachment(
                 buy_rows=buy_rows,
                 details=details,                 # 차트/전일 거래량 산출용 원시 피처 DF
@@ -549,42 +556,6 @@ def main():
     sells = sum(1 for r in results if str(r.get("signal")).upper()=="SELL")
     holds = total - buys - sells
     print(f"[SUMMARY] total={total}, BUY={buys}, SELL={sells}, HOLD={holds}")
-
-    # ---------- 메일 전송 ----------
-    try:
-        send_mail_html(
-            smtp_user=smtp_user,
-            app_password=app_password,
-            to_addrs=cfg['email']['to_addrs'],
-            subject=cfg['email']['subject'],
-            html=html,
-            from_name=cfg['email']['from_name'],
-            attachments=attachment_paths if attachment_paths else None
-        )
-    except Exception as e:
-        # 552 등 용량 에러 폴백: 표만, 150행 제한, 첨부 없음
-        print(f"[WARN] email send failed: {e}")
-        fallback_html = build_html_report(
-            [r for r in results if str(r.get("signal")).upper() in ("BUY","SELL")],
-            {},
-            cfg,
-            show_charts=False,
-            max_table_rows=150
-        )
-        try:
-            send_mail_html(
-                smtp_user=smtp_user,
-                app_password=app_password,
-                to_addrs=cfg['email']['to_addrs'],
-                subject=cfg['email']['subject'] + " (fallback)",
-                html=fallback_html,
-                from_name=cfg['email']['from_name'],
-                attachments=None
-            )
-            print("Sent fallback email (reduced size).")
-        except Exception as e2:
-            print(f"Email failed even after fallback: {e2}", file=sys.stderr)
-            sys.exit(1)
 
     # ---------- 메일 전송 ----------
     try:
