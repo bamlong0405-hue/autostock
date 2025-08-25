@@ -543,7 +543,7 @@ def main():
                 out_path=f"{cfg['general']['output_dir'].rstrip('/')}/buy_report.html",
                 max_charts=max_buy_charts,       # 30으로 늘리면 embed_charts=False 권장
                 aux_info=aux_info,               # 뉴스/공시
-                embed_charts=embed_charts,       # False면 용량 매우 작음(권장)
+                embed_charts=True,       # False면 용량 매우 작음(권장)
                 turnover_map=turnover_map,       # 회전율 표시
             )
             attachment_paths.append(attach_path)
