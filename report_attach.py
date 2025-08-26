@@ -61,13 +61,13 @@ def _small_price_chart(df: pd.DataFrame, name: str, cfg: dict) -> str:
     사이즈/선명도는 config.toml > [email_options]에서 조정:
       attach_chart_width  = 8.0
       attach_chart_height = 3.6
-      attach_chart_dpi    = 140
+      attach_chart_dpi    = 110
     """
     # 기본값 (기존 6x3 → 8x3.6로 확대, DPI도 110→140로 상향)
     eo   = cfg.get("email_options", {}) if isinstance(cfg, dict) else {}
-    w    = float(eo.get("attach_chart_width", 10.0))
-    h    = float(eo.get("attach_chart_height", 5.0))
-    dpi  = int(eo.get("attach_chart_dpi", 140))
+    w    = float(eo.get("attach_chart_width", 8.0))
+    h    = float(eo.get("attach_chart_height", 3.6))
+    dpi  = int(eo.get("attach_chart_dpi", 110))
 
     d = df.tail(60).copy()
     fig, ax = plt.subplots(figsize=(w, h))
