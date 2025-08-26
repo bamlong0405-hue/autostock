@@ -44,33 +44,47 @@ HTML_FOOTER = "</body></html>"
 # -----------------------------
 # 작은 유틸
 # -----------------------------
-def _fig_to_base64(fig) -> str:
+def _fig_to_base64(fig, dpi: int = 110) -> str:
+    import io, base64
     buf = io.BytesIO()
     fig.tight_layout()
-    fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     b64 = base64.b64encode(buf.read()).decode("ascii")
     return f"data:image/png;base64,{b64}"
 
 
-def _small_price_chart(df: pd.DataFrame, name: str) -> str:
+def _small_price_chart(df: pd.DataFrame, name: str, cfg: dict) -> str:
     """
     최근 60봉 종가/MA20/볼밴 표시
+    사이즈/선명도는 config.toml > [email_options]에서 조정:
+      attach_chart_width  = 8.0
+      attach_chart_height = 3.6
+      attach_chart_dpi    = 140
     """
+    # 기본값 (기존 6x3 → 8x3.6로 확대, DPI도 110→140로 상향)
+    eo   = cfg.get("email_options", {}) if isinstance(cfg, dict) else {}
+    w    = float(eo.get("attach_chart_width", 10.0))
+    h    = float(eo.get("attach_chart_height", 5.0))
+    dpi  = int(eo.get("attach_chart_dpi", 140))
+
     d = df.tail(60).copy()
-    fig, ax = plt.subplots(figsize=(6, 3.0))
-    ax.plot(d.index, d["Close"], label="Close")
+    fig, ax = plt.subplots(figsize=(w, h))
+    ax.plot(d.index, d["Close"], label="Close", linewidth=1.4)
     if "MA_M" in d.columns:
-        ax.plot(d.index, d["MA_M"], label="MA20")
-    # 볼밴 (있으면)
-    if {"BB_UPPER", "BB_LOWER"}.issubset(set(d.columns)):
-        ax.plot(d.index, d["BB_UPPER"], linewidth=0.8, label="BB Upper")
-        ax.plot(d.index, d["BB_LOWER"], linewidth=0.8, label="BB Lower")
+        ax.plot(d.index, d["MA_M"], label="MA20", linewidth=1.2)
+
+    # 볼밴(있으면 라인도 약간 두껍게)
+    if {"BB_UPPER", "BB_LOWER"}.issubset(d.columns):
+        ax.plot(d.index, d["BB_UPPER"], linewidth=1.0, label="BB Upper")
+        ax.plot(d.index, d["BB_LOWER"], linewidth=1.0, label="BB Lower")
+
     ax.set_title(name)
     ax.grid(True, linestyle=":", linewidth=0.6)
     ax.legend()
-    return _fig_to_base64(fig)
+
+    return _fig_to_base64(fig, dpi=dpi)
 
 
 def _near(x: float, y: float, tol: float) -> bool:
