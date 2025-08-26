@@ -234,7 +234,7 @@ def build_buy_attachment(
         # 차트
         chart_uri = ""
         if embed_charts and isinstance(df, pd.DataFrame) and not df.empty:
-            chart_uri = _small_price_chart(df, f"{name} ({sym})")
+            chart_uri = _small_price_chart(df, f"{name} ({sym})", cfg)
 
         # 기본 키값
         rsi = r.get("rsi", None)
