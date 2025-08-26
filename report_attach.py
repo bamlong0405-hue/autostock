@@ -1,5 +1,4 @@
 # report_attach.py
-import io
 import os
 import math
 import base64
@@ -7,6 +6,8 @@ from datetime import datetime
 from typing import List, Dict, Optional, Any
 
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")  # CI/서버에서 안정적으로 렌더링
 import matplotlib.pyplot as plt
 
 # (선택) 간단 리뷰 문구 생성 — 없으면 무시
@@ -40,12 +41,11 @@ ul { margin: 6px 0 0 18px; }
 
 HTML_FOOTER = "</body></html>"
 
-
 # -----------------------------
-# 작은 유틸
+# 유틸
 # -----------------------------
 def _fig_to_base64(fig, dpi: int = 110) -> str:
-    import io, base64
+    import io
     buf = io.BytesIO()
     fig.tight_layout()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
@@ -54,16 +54,14 @@ def _fig_to_base64(fig, dpi: int = 110) -> str:
     b64 = base64.b64encode(buf.read()).decode("ascii")
     return f"data:image/png;base64,{b64}"
 
-
 def _small_price_chart(df: pd.DataFrame, name: str, cfg: dict) -> str:
     """
-    최근 60봉 종가/MA20/볼밴 표시
-    사이즈/선명도는 config.toml > [email_options]에서 조정:
+    최근 60봉 종가/MA20/볼린저 밴드
+    크기/선명도는 config.toml > [email_options]에서 조절:
       attach_chart_width  = 8.0
       attach_chart_height = 3.6
       attach_chart_dpi    = 110
     """
-    # 기본값 (기존 6x3 → 8x3.6로 확대, DPI도 110→140로 상향)
     eo   = cfg.get("email_options", {}) if isinstance(cfg, dict) else {}
     w    = float(eo.get("attach_chart_width", 8.0))
     h    = float(eo.get("attach_chart_height", 3.6))
@@ -74,54 +72,43 @@ def _small_price_chart(df: pd.DataFrame, name: str, cfg: dict) -> str:
     ax.plot(d.index, d["Close"], label="Close", linewidth=1.4)
     if "MA_M" in d.columns:
         ax.plot(d.index, d["MA_M"], label="MA20", linewidth=1.2)
-
-    # 볼밴(있으면 라인도 약간 두껍게)
     if {"BB_UPPER", "BB_LOWER"}.issubset(d.columns):
         ax.plot(d.index, d["BB_UPPER"], linewidth=1.0, label="BB Upper")
         ax.plot(d.index, d["BB_LOWER"], linewidth=1.0, label="BB Lower")
-
     ax.set_title(name)
     ax.grid(True, linestyle=":", linewidth=0.6)
     ax.legend()
-
     return _fig_to_base64(fig, dpi=dpi)
 
-
 def _near(x: float, y: float, tol: float) -> bool:
-    """x가 y에 tol 비율 이내로 가까운가 (예: tol=0.01 → 1%)"""
-    if x is None or y is None or not (isinstance(x, (int, float)) and isinstance(y, (int, float))):
+    if x is None or y is None or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
         return False
     if y == 0:
         return abs(x - y) <= tol
     return abs(x - y) / abs(y) <= tol
 
-
 def _fib_zone_label(close: float, low: float, high: float, tol_ratio: float = 0.01) -> Optional[str]:
-    """
-    최근 N봉 high/low 기준으로 38.2 / 50 / 61.8 % 되돌림 근처면 레이블 반환
-    """
     if any(v is None for v in (close, low, high)) or math.isclose(high, low):
         return None
     span = high - low
     f382 = high - 0.382 * span
     f500 = high - 0.500 * span
     f618 = high - 0.618 * span
-    if _near(close, f382, tol_ratio): return "피보나치 38.2%"
-    if _near(close, f500, tol_ratio): return "피보나치 50%"
-    if _near(close, f618, tol_ratio): return "피보나치 61.8%"
+    if _near(close, f382, tol_ratio): return "피보 38.2%"
+    if _near(close, f500, tol_ratio): return "피보 50%"
+    if _near(close, f618, tol_ratio): return "피보 61.8%"
     return None
-
 
 def _combo_signals(last: pd.Series, tail: pd.DataFrame) -> Dict[str, Any]:
     """
-    컨플루언스(지표 조합) 검출:
+    컨플루언스(지표 조합) 요약:
       - BB_POS_PCT ≤ 20, RSI ≤ 35
-      - MACD 골든/데드 크로스
+      - MACD 골든/데드
       - WR ≤ -80
-      - MA20 하회(과도 괴리 음수)
+      - MA20 하단 괴리 크면 +
       - 거래량 급증 (당일 > 20일 평균 * 1.5)
-      - 피보나치 되돌림 레벨 근접
-    반환: {'hits':[...], 'score':float}
+      - 40봉 기준 피보 되돌림 근처
+      - 상승 장악형
     """
     hits: List[str] = []
     score = 0.0
@@ -133,17 +120,15 @@ def _combo_signals(last: pd.Series, tail: pd.DataFrame) -> Dict[str, Any]:
         except Exception:
             return None
 
-    # 1) 볼밴 위치 & RSI
     bb_pos = _get("BB_POS_PCT")
     rsi = _get("RSI")
     if bb_pos is not None and bb_pos <= 20:
         hits.append("볼밴 하단권")
         score += 0.8
     if rsi is not None and rsi <= 35:
-        hits.append("RSI 저평가 구간")
+        hits.append("RSI 저평가")
         score += 0.8
 
-    # 2) MACD 골든/데드
     macd = _get("MACD"); macd_sig = _get("MACD_SIG")
     macd_prev = tail["MACD"].iloc[-2] if "MACD" in tail.columns and len(tail) >= 2 else None
     macd_sig_prev = tail["MACD_SIG"].iloc[-2] if "MACD_SIG" in tail.columns and len(tail) >= 2 else None
@@ -162,13 +147,11 @@ def _combo_signals(last: pd.Series, tail: pd.DataFrame) -> Dict[str, Any]:
         hits.append("MACD 데드크로스(주의)")
         score -= 0.8
 
-    # 3) WR 저점권
     wr = _get("WR")
     if wr is not None and wr <= -80:
         hits.append("WR 저점권")
         score += 0.6
 
-    # 4) MA20 괴리(음수면 하단)
     close = _get("Close"); ma20 = _get("MA_M")
     if close is not None and ma20 and ma20 > 0:
         gap_pct = (close - ma20) / ma20 * 100.0
@@ -176,29 +159,25 @@ def _combo_signals(last: pd.Series, tail: pd.DataFrame) -> Dict[str, Any]:
             hits.append(f"20일선 하단(-{abs(gap_pct):.1f}%)")
             score += 0.5
 
-    # 5) 거래량 급증
     vol = _get("Volume"); vol_ma20 = _get("VOL_MA20")
     if vol is not None and vol_ma20 and vol_ma20 > 0 and vol > (vol_ma20 * 1.5):
         hits.append("거래량 급증")
         score += 0.6
 
-    # 6) 피보나치 레벨
     if {"High", "Low", "Close"}.issubset(tail.columns) and len(tail) >= 40:
         swing_low = float(tail["Low"].tail(40).min())
         swing_high = float(tail["High"].tail(40).max())
         fib = _fib_zone_label(close, swing_low, swing_high, tol_ratio=0.01)
         if fib:
-            hits.append(f"{fib} 지지·저항 부근")
+            hits.append(f"{fib} 부근")
+        if fib:
             score += 0.4
 
-    # 7) 캔들 장악형(있으면 가점)
-    bull_eng = bool(last.get("Bull_Engulf", False))
-    if bull_eng:
+    if bool(last.get("Bull_Engulf", False)):
         hits.append("상승 장악형")
         score += 0.6
 
     return {"hits": hits, "score": round(score, 2)}
-
 
 # -----------------------------
 # 본문 생성
@@ -215,15 +194,14 @@ def build_buy_attachment(
 ) -> str:
     """
     buy_rows : signal == BUY 인 dict 리스트
-    details  : 심볼 -> 피처 DataFrame (Close/MA_M/RSI/WR/OBV_slope/VOL_MA20/BB_* 포함 권장)
+    details  : 심볼 -> 피처 DataFrame (Close/MA_M/RSI/WR/OBV_slope/VOL_MA20/BB_* 권장)
     aux_info : 심볼 -> {"news":[{title,link,published}], "filings":[{rpt,link,rcpdt}]}
     turnover_map: 심볼 -> {"turnover_pct": float(일일%), "board":"KOSPI/KOSDAQ"}
     """
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     html: List[str] = [HTML_HEADER, f"<h1>BUY Report</h1><div class='meta'>Generated at {ts}</div>"]
 
-    # 첨부 용량 보호: 상한
-    take = buy_rows[:max_charts]
+    take = buy_rows[:max_charts]  # 첨부 용량 보호
 
     for r in take:
         sym = r["symbol"]
@@ -231,12 +209,12 @@ def build_buy_attachment(
         name = r.get("name", sym)
         df = details.get(sym)
 
-        # 차트
+        # 차트 (옵션: embed_charts=True 일 때만)
         chart_uri = ""
         if embed_charts and isinstance(df, pd.DataFrame) and not df.empty:
             chart_uri = _small_price_chart(df, f"{name} ({sym})", cfg)
 
-        # 기본 키값
+        # 기본 값들
         rsi = r.get("rsi", None)
         wr  = r.get("wr", None)
         gap = r.get("ma20_gap_pct", None)
@@ -256,7 +234,7 @@ def build_buy_attachment(
                 prev_vol = float(df["Volume"].iloc[-2]) if pd.notna(df["Volume"].iloc[-2]) else None
 
         if turnover_map and sym in turnover_map:
-            tinfo = turnover_map[sym]
+            tinfo = turnover_map[sym] or {}
             tov = tinfo.get("turnover_pct")
             brd = tinfo.get("board")
             tov_txt = f"{tov:.2f}%/day ({brd})" if isinstance(tov, (int, float)) else None
@@ -279,22 +257,21 @@ def build_buy_attachment(
         if chart_uri:
             html.append(f"<img src='{chart_uri}' alt='chart'/>")
 
-        # ---- 기술 근거(기존) ----
+        # ---- 쉬운 설명(기술 근거) ----
         reasons: List[str] = []
         if rsi is not None:
-            reasons.append("RSI 값이 낮아 '싸졌을' 가능성을 시사")
+            reasons.append("RSI가 낮으면 '가격이 많이 눌린 상태'일 수 있어요.")
         if wr is not None:
-            reasons.append("윌리엄스 %R이 저점권이면 '바닥에서 반등' 기대")
+            reasons.append("윌리엄스 %R이 -80 아래면 '바닥권'일 가능성이 있어요.")
         if gap is not None:
-            reasons.append("20일선과의 괴리로 과열/침체 정도를 파악")
+            reasons.append("주가가 20일선보다 많이 아래면 '되돌림' 여지가 생기곤 해요.")
 
-        # OBV/캔들/볼밴 위치 텍스트
         if isinstance(df, pd.DataFrame) and not df.empty:
             last = df.iloc[-1]
             if "OBV_slope" in df.columns and pd.notna(last.get("OBV_slope", None)):
-                reasons.append("OBV 기울기로 수급(매수/매도 에너지) 방향 참고")
+                reasons.append("OBV 기울기로 수급(매수/매도 에너지) 흐름을 볼 수 있어요.")
             if "Bull_Engulf" in df.columns and bool(last.get("Bull_Engulf", False)):
-                reasons.append("캔들 패턴: 상승 장악형 포착")
+                reasons.append("캔들 패턴: '상승 장악형'은 반등 신호로 자주 인용돼요.")
             if "BB_POS_PCT" in df.columns and pd.notna(last.get("BB_POS_PCT", None)):
                 reasons.append(f"볼린저밴드 위치 {float(last['BB_POS_PCT']):.1f}% (0% 하단·100% 상단)")
 
@@ -304,23 +281,21 @@ def build_buy_attachment(
                 html.append(f"<li>{t}</li>")
             html.append("</ul>")
 
-        # ---- ★ 지표 조합(컨플루언스) 박스 ----
+        # ---- 지표 조합(컨플루언스) ----
         if isinstance(df, pd.DataFrame) and len(df) >= 3:
             tail = df.tail(60).copy()
             last = tail.iloc[-1]
             combo = _combo_signals(last, tail)
             hits = combo["hits"]; score = combo["score"]
-
             if hits:
                 html.append("<div class='box'>")
                 html.append("<div style='font-weight:600;margin-bottom:6px'>지표 조합 신호</div>")
-                html.append("<div class='note'>여러 지표가 동시에 같은 방향을 가리키면 신뢰도가 높아집니다.</div>")
+                html.append("<div class='note'>여러 지표가 같은 방향이면 신뢰도가 높아집니다.</div>")
                 html.append("<div style='margin:6px 0'>")
                 for h in hits:
                     html.append(f"<span class='badge'>{h}</span>")
                 html.append("</div>")
-                html.append(f"<div class='subtle'>Combo score: <b>{score:.2f}</b> "
-                            "(MACD/RSI/볼밴/WR/MA20괴리/거래량/피보 기준)</div>")
+                html.append(f"<div class='subtle'>Combo score: <b>{score:.2f}</b></div>")
                 html.append("</div>")
 
         # ---- (선택) 리뷰(간단 요약) ----
