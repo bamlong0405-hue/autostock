@@ -27,17 +27,17 @@ except Exception:
 
 # (옵션) 펀더멘털/뉴스/공시
 try:
-    from fundamentals import fetch_fundamental_map  # {'000660': {'PER':..,'PBR':..,'DIV':..}, ...}
+    from fundamentals import fetch_fundamental_map
 except Exception:
     fetch_fundamental_map = None
 
 try:
-    from news import fetch_news_headlines  # (name, max_items, lang) -> [{'title','link','published'}]
+    from news import fetch_news_headlines
 except Exception:
     fetch_news_headlines = None
 
 try:
-    from dart_client import latest_filings  # (corp_name, max_items) -> [{'rpt','link','rcpdt'}]
+    from dart_client import latest_filings
 except Exception:
     latest_filings = None
 
@@ -61,14 +61,12 @@ def analyze_symbol(symbol: str, market: str, cfg: dict):
         df = fetch_yahoo(symbol, yah_start, yah_end)
 
     if df is None or df.empty or len(df) < max(60, lb // 2):
-        # (feat빈값, info빈딕트, df 그대로)
         return pd.DataFrame(), {}, df
 
     feat = build_features(df, cfg)
     sig = generate_signal(feat, cfg)
     feat['Signal'] = sig
 
-    # 마지막 유효 행
     latest_idx = sig.last_valid_index()
     if latest_idx is None:
         return pd.DataFrame(), {}, df
@@ -115,7 +113,6 @@ def maybe_run_backtest(cfg: dict, feats_map: dict, df_map: dict):
     lb = int(bt.get('lookback_days', 900))
     m_symbol = bt.get('market_filter_symbol', '069500')
 
-    # 시장 필터용 DF
     m_df = df_map.get(m_symbol)
     if m_df is None or m_df.empty:
         ks, ke, _, _ = date_range_for_lookback(lb)
@@ -174,10 +171,6 @@ def maybe_run_backtest(cfg: dict, feats_map: dict, df_map: dict):
 # BUY 랭킹(상위 후보만 메일/첨부)
 # -------------------------------
 def rank_buy_candidates(buy_rows, extras, top_n=30):
-    """
-    buy_rows: [{'symbol','market','name','rsi','wr',...}, ...]
-    extras:   {'turnover_pct': {sym: pct or None}, 'obv_slope': {sym: val or None}}
-    """
     rows = []
     for r in buy_rows:
         sym = r["symbol"]
@@ -186,10 +179,9 @@ def rank_buy_candidates(buy_rows, extras, top_n=30):
         obv = extras.get("obv_slope", {}).get(sym) or 0.0
         tov = extras.get("turnover_pct", {}).get(sym) or 0.0
 
-        # 간단 정규화
-        rsi_score = max(0.0, (50.0 - rsi) / 50.0)     # RSI 낮을수록 +
-        wr_score  = max(0.0, (-20.0 - wr) / 80.0)     # WR -100~-20 구간 +
-        obv_score = max(0.0, obv)                     # 양수일수록 +
+        rsi_score = max(0.0, (50.0 - rsi) / 50.0)
+        wr_score  = max(0.0, (-20.0 - wr) / 80.0)
+        obv_score = max(0.0, obv)
         tov_score = max(0.0, min(tov, 1.0))           # 0~1%/day까지만 가점
 
         score = (0.35 * rsi_score) + (0.35 * wr_score) + (0.20 * obv_score) + (0.10 * tov_score)
@@ -218,10 +210,14 @@ def main():
         if not feat.empty:
             results.append(info)
 
-            # 리포트에 필요한 최소 열만 저장(메모리 보호)
+            # 🔧 리포트/첨부에 필요한 컬럼을 충분히 저장해야 함!
             save_cols = [c for c in [
-                'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope',
-                'Bullish','Bearish','Bull_Engulf','BB_POS_PCT','BB_UPPER','BB_LOWER'
+                'Open','High','Low','Close','Volume',         # ← 전일 거래량/표시용
+                'MA_M','RSI','WR','OBV','OBV_slope',
+                'VOL_MA20',                                   # ← 거래량 평균(컨플루언스)
+                'MACD','MACD_SIG',                            # ← MACD 골든/데드
+                'Bullish','Bearish','Bull_Engulf',
+                'BB_POS_PCT','BB_UPPER','BB_LOWER'
             ] if c in feat.columns]
             details[sym] = feat[save_cols].copy()
             feats_map[sym] = feat
@@ -236,8 +232,11 @@ def main():
         if not feat.empty:
             results.append(info)
             save_cols = [c for c in [
-                'Open','High','Low','Close','MA_M','RSI','WR','OBV','OBV_slope',
-                'Bullish','Bearish','Bull_Engulf','BB_POS_PCT','BB_UPPER','BB_LOWER'
+                'Open','High','Low','Close','Volume',
+                'MA_M','RSI','WR','OBV','OBV_slope',
+                'VOL_MA20','MACD','MACD_SIG',
+                'Bullish','Bearish','Bull_Engulf',
+                'BB_POS_PCT','BB_UPPER','BB_LOWER'
             ] if c in feat.columns]
             details[sym] = feat[save_cols].copy()
             feats_map[sym] = feat
@@ -252,9 +251,7 @@ def main():
         # ---------------------------
         filt = cfg.get("filters", {})
         use_turnover = bool(filt.get("use_turnover", False))
-        # 오늘(또는 최근 영업일) 스냅샷 거래대금/시총으로 회전율 계산
         turnover_info = _ds.attach_turnover_krx([r["symbol"] for r in results if r["market"] == "KRX"])
-        # board(KOSPI/KOSDAQ) 기준 임계치
         kospi_min = float(filt.get("turnover_min_pct_kospi", 0.15))
         kosdaq_min = float(filt.get("turnover_min_pct_kosdaq", 0.25))
 
@@ -273,14 +270,13 @@ def main():
                     ma = r_df['Close'].rolling(regime_days).mean()
                     regime_ok = bool(r_df['Close'].iloc[-1] > ma.iloc[-1])
             except Exception:
-                regime_ok = True  # 장애 시 무시
+                regime_ok = True
 
-        # BUY/SELL/HOLD 수 집계
         raw_counts = pd.Series([str(r.get("signal")).upper() for r in results]).value_counts()
         print(f"[DEBUG] raw BUY/HOLD/SELL = "
               f"{raw_counts.get('BUY',0)} {raw_counts.get('HOLD',0)} {raw_counts.get('SELL',0)}")
 
-        # 1) 회전율 필터 적용 (옵션)
+        # 1) 회전율 필터
         filtered_results = []
         for r in results:
             if str(r.get("signal")).upper() != "BUY" or not use_turnover:
@@ -307,7 +303,7 @@ def main():
         print(f"[DEBUG] after turnover => BUY = "
               f"{sum(1 for x in results if str(x.get('signal')).upper()=='BUY')}")
 
-        # 2) 레짐: 약세장이면 BUY 무효화
+        # 2) 레짐: 약세장이면 BUY → HOLD
         if regime_disable and not regime_ok:
             for r in results:
                 if str(r.get("signal")).upper() == "BUY":
@@ -320,7 +316,6 @@ def main():
             buy_rows_now = [r for r in results if str(r.get("signal")).upper() == "BUY"]
 
             if len(buy_rows_now) > max_buys:
-                # 랭킹에 필요한 보조 맵
                 obv_map = {}
                 for r in buy_rows_now:
                     sym = r["symbol"]
@@ -336,7 +331,6 @@ def main():
                     extras={"turnover_pct": tov_map, "obv_slope": obv_map},
                     top_n=max_buys
                 )
-                # ranked 외 나머지 BUY는 HOLD로 다운그레이드
                 ranked_syms = {r["symbol"] for r in ranked}
                 new_results = []
                 for r in results:
@@ -413,7 +407,7 @@ def main():
         all_html = build_html_report(
             results, details, cfg,
             show_charts=True,
-            max_charts=50,
+            max_charts=30,
             max_table_rows=100000
         )
 
@@ -426,14 +420,13 @@ def main():
         max_email_charts = int(email_opts.get("max_email_charts", 0))
         max_email_rows = int(email_opts.get("max_email_rows", 300))
 
-        # BUY 우선 랭킹 리스트 (첨부와 동일 기준)
         buy_rows_all = [r for r in results if str(r.get("signal")).upper() == "BUY"]
         obv_map2 = {r["symbol"]: (float(details[r["symbol"]]["OBV_slope"].iloc[-1])
                                   if r["symbol"] in details and "OBV_slope" in details[r["symbol"]].columns and not details[r["symbol"]].empty else 0.0)
                     for r in buy_rows_all}
         tov_map2 = {r["symbol"]: (_ds.attach_turnover_krx([r["symbol"]]).get(r["symbol"], {}).get("turnover_pct") or 0.0)
                     for r in buy_rows_all} if buy_rows_all else {}
-        # 상위 25%(10~40) 기본
+
         email_buy_rows = rank_buy_candidates(
             buy_rows_all,
             extras={"turnover_pct": tov_map2, "obv_slope": obv_map2},
@@ -447,9 +440,7 @@ def main():
             )
             if not filtered:
                 html = "<html><body><h1>No BUY/SELL signals today</h1></body></html>"
-                filtered_details = {}
             else:
-                # 차트 포함을 켜더라도 본문은 가볍게(보통 False)
                 symbols = [r["symbol"] for r in filtered]
                 if include_charts and max_email_charts > 0:
                     symbols = symbols[:max_email_charts]
@@ -482,13 +473,12 @@ def main():
 
     email_opts = cfg.get("email_options", {})
     attach_buy_report = bool(email_opts.get("attach_buy_report", True))
-    max_buy_charts    = int(email_opts.get("max_buy_charts", 10))   # 30으로 올려도 됨
-    embed_charts      = bool(email_opts.get("attach_embed_charts", False))  # 기본 False(용량 절감)
+    max_buy_charts    = int(email_opts.get("max_buy_charts", 10))   # 필요 시 30
+    embed_charts      = bool(email_opts.get("attach_embed_charts", False))  # 기본 False
 
-    # (1) BUY만 추려서 보조 데이터 준비
     buy_rows = [r for r in results if str(r.get("signal")).upper() == "BUY"]
 
-    # 뉴스/공시 수집 (이미 위에서 만든 aux_info가 있으면 재사용)
+    # 뉴스/공시 보강(위에서 만든 aux_info 그대로 사용)
     try:
         aux_info
     except NameError:
@@ -499,7 +489,6 @@ def main():
             max_filings = int(email_opts.get("max_filings_per_symbol", 3))
         except Exception:
             max_news, max_filings = 3, 3
-
         if buy_rows:
             for r in buy_rows:
                 sym = r["symbol"]
@@ -521,7 +510,7 @@ def main():
                 if news_items or filings:
                     aux_info[sym] = {"news": news_items, "filings": filings}
 
-    # (2) 회전율(당일) 맵: {sym: {"turnover_pct":..., "board":...}}
+    # (2) 회전율(당일) 맵
     turnover_map = {}
     try:
         buy_syms = [r["symbol"] for r in buy_rows if r.get("market") == "KRX"]
@@ -538,13 +527,13 @@ def main():
             from report_attach import build_buy_attachment
             attach_path = build_buy_attachment(
                 buy_rows=buy_rows,
-                details=details,                 # 차트/전일 거래량 산출용 원시 피처 DF
+                details=details,
                 cfg=cfg,
                 out_path=f"{cfg['general']['output_dir'].rstrip('/')}/buy_report.html",
-                max_charts=max_buy_charts,       # 30으로 늘리면 embed_charts=False 권장
-                aux_info=aux_info,               # 뉴스/공시
-                embed_charts=True,       # False면 용량 매우 작음(권장)
-                turnover_map=turnover_map,       # 회전율 표시
+                max_charts=max_buy_charts,
+                aux_info=aux_info,
+                embed_charts=True,          # 첨부에 차트 내장(용량↑)
+                turnover_map=turnover_map,
             )
             attachment_paths.append(attach_path)
         except Exception as e:
