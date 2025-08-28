@@ -12,7 +12,7 @@ lookback_days   = 200          # 분석용 데이터 기간(영업일 기준 아
 [email]
 from_name = "AutoStock Bot"
 from_addr = "bamlong0405@gmail.com"      # 발신 Gmail 주소
-to_addrs  = ["bamlong0405@gmail.com","eunkil.park@gmail.com","chyun.lim@samsung.com"]    # 수신자(복수 가능)
+to_addrs  = ["bamlong0405@gmail.com","eunkil.park@gmail.com","chyun.lim@samsung.com","nnew0420@naver.com"]    # 수신자(복수 가능)
 subject   = "[AutoStock] Daily Signals"
 
 [email_options]
